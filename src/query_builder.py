@@ -199,21 +199,26 @@ def _llm_queries_for_topic(
     n: int = _LLM_QUERIES_PER_TOPIC,
 ) -> list[str]:
     """
-    Ask claude-haiku to generate `n` diverse search query strings for `topic`.
+    Ask claude-haiku to generate `n` search query strings for `topic`, then
+    validate them to remove any that have drifted to adjacent or broader topics.
 
     Falls back to the mechanical cross-product strings on any error so callers
     never get an empty list.
     """
     prompt = (
         f"Generate {n} diverse academic search queries to find SURVEY papers, "
-        f"literature reviews, and systematic reviews about:\n\n"
-        f"  Topic: {topic}\n\n"
-        f"Requirements:\n"
-        f"- Use different phrasings, synonyms, subtopics, and domain terminology\n"
-        f"- Each query must target SURVEY/REVIEW papers (not primary research)\n"
-        f"- Queries should work well on arXiv, OpenAlex, and CORE search APIs\n"
-        f"- Keep each query between 3 and 8 words\n"
-        f"- No duplicates\n\n"
+        f"literature reviews, and systematic reviews about this EXACT topic:\n\n"
+        f"  \"{topic}\"\n\n"
+        f"Rules:\n"
+        f"- Every query must stay on THIS EXACT TOPIC — do not drift to broader, "
+        f"narrower, or adjacent topics.\n"
+        f"- Vary only the phrasing and terminology, never the core subject.\n"
+        f"- Each query MUST include at least one survey/review term "
+        f"(survey, review, overview, taxonomy, literature review, systematic review, "
+        f"state of the art, etc.).\n"
+        f"- Queries should work on academic APIs (OpenAlex, arXiv, CORE): "
+        f"3–8 natural English words.\n"
+        f"- No duplicate queries.\n\n"
         f"Return a JSON array of exactly {n} query strings."
     )
 
@@ -235,9 +240,15 @@ def _llm_queries_for_topic(
         result = json.loads(raw)
         if isinstance(result, list) and result:
             strings = [str(s).strip() for s in result if str(s).strip()]
+
+            # Validate: remove queries that drifted from the intended topic
+            strings = _validate_queries(client, topic, strings)
+
             logger.info(
-                "LLM generated %d queries for topic '%s'", len(strings), topic
+                "LLM generated %d queries for topic '%s':", len(strings), topic
             )
+            for q in strings:
+                logger.info("  • %s", q)
             return strings
 
         logger.warning("LLM returned empty/invalid list for topic '%s'", topic)
@@ -248,8 +259,71 @@ def _llm_queries_for_topic(
             topic, exc,
         )
 
-    # Fallback: a few hand-crafted queries so retrieval still runs
     return _fallback_queries(topic)
+
+
+def _validate_queries(
+    client: anthropic.Anthropic,
+    topic: str,
+    queries: list[str],
+) -> list[str]:
+    """
+    Filter generated queries to remove any that have drifted from the topic.
+
+    Asks the same claude-haiku model to check each query: does it specifically
+    search for surveys about the EXACT topic, or has it wandered to something
+    adjacent?  Queries that fail the check are dropped.
+
+    We always keep at least 5 queries (falls back to the full list if too many
+    are rejected) so retrieval never runs with an empty query set.
+    """
+    if len(queries) <= 3:
+        return queries  # not worth a validation call for tiny sets
+
+    numbered = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
+    prompt = (
+        f"Research topic: \"{topic}\"\n\n"
+        f"Below are search queries generated to find survey papers about that topic. "
+        f"For each query, answer true if it specifically searches for surveys/reviews "
+        f"about the EXACT topic above, or false if it has drifted to a different, "
+        f"broader, or adjacent topic.\n\n"
+        f"{numbered}\n\n"
+        f"Return a JSON array of {len(queries)} booleans in the same order. "
+        f"No explanation."
+    )
+
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=128,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        mask = json.loads(raw.strip())
+
+        if isinstance(mask, list) and len(mask) == len(queries):
+            validated = [q for q, keep in zip(queries, mask) if keep]
+            removed = [q for q, keep in zip(queries, mask) if not keep]
+            if removed:
+                logger.info(
+                    "Query validation removed %d drifted queries for '%s': %s",
+                    len(removed), topic,
+                    "; ".join(f'"{q}"' for q in removed),
+                )
+            # Safety floor: always keep at least 5 queries
+            if len(validated) >= 5:
+                return validated
+            logger.debug(
+                "Validation kept only %d queries — reverting to full set", len(validated)
+            )
+    except Exception as exc:
+        logger.debug("Query validation failed for '%s': %s — keeping all", topic, exc)
+
+    return queries
 
 
 def _fallback_queries(topic: str) -> list[str]:
