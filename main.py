@@ -464,7 +464,87 @@ def _run_analyze_steps(
         logger.info("Skipping PDF parsing (--no-pdf-parse).")
 
     # ------------------------------------------------------------------ #
-    # 8. Architecture analysis                                             #
+    # 8. LLM-as-Judge  (moved before architecture so we can skip papers   #
+    #    the judge deems off-topic before spending architecture tokens)    #
+    # ------------------------------------------------------------------ #
+    judge_map: dict[str, JudgeResult] = {}
+    run_judge = (
+        not args.no_judge
+        and bool(summary_pairs)
+        and bool(cfg.anthropic_api_key)
+    )
+    if run_judge:
+        logger.info("Running LLM judge on top %d papers …", cfg.judge_top_n)
+        judge = LLMJudge(cfg)
+        judge_triples = judge.judge_papers(summary_pairs)
+        judge_map = {sp.paper.title: jr for sp, _, jr in judge_triples}
+        failed_j = sum(1 for _, _, jr in judge_triples if jr.judge_failed)
+        logger.info(
+            "Judge complete: %d assessed, %d failed",
+            len(judge_triples) - failed_j, failed_j,
+        )
+
+        # ── Re-rank scored_papers by judge-adjusted score ──────────────
+        # The base quality_score rewards citations and venue but is blind
+        # to topic specificity.  The judge now assigns topic_relevance (1-5)
+        # and recommended_action, which we fold in here so the final ranking
+        # reflects actual relevance to the configured research topics.
+        #
+        # Adjustment formula (centred at topic_relevance=3, action=optional):
+        #   +40  must_read      +0  optional
+        #   +20  worth_reading  -100 skip  (effectively removed from output)
+        #   topic_relevance bonus/penalty: (relevance - 3) × 10
+        #   → max uplift: +40 + 20 = +60   max penalty: -100 + -20 = -120
+        _ACTION_DELTA = {
+            "must_read": 40, "worth_reading": 20, "optional": 0, "skip": -100,
+        }
+        _RELEVANCE_WEIGHT = 10  # pts per step above/below the neutral 3
+
+        for sp in scored_papers:
+            jr = judge_map.get(sp.paper.title)
+            if jr and not jr.judge_failed:
+                action_delta     = _ACTION_DELTA.get(jr.recommended_action, 0)
+                relevance_delta  = (jr.topic_relevance - 3) * _RELEVANCE_WEIGHT
+                sp.judge_adjusted_score = sp.quality_score + action_delta + relevance_delta
+            else:
+                # No judge result → keep original score (no penalty)
+                sp.judge_adjusted_score = sp.quality_score
+
+        scored_papers.sort(key=lambda x: x.judge_adjusted_score, reverse=True)
+
+        skip_count = sum(
+            1 for sp in scored_papers
+            if judge_map.get(sp.paper.title, JudgeResult(paper_title=sp.paper.title)).recommended_action == "skip"
+        )
+        logger.info(
+            "Re-ranked %d papers by judge-adjusted score "
+            "(%d marked 'skip' — moved to bottom of results).",
+            len(scored_papers), skip_count,
+        )
+    elif args.no_judge:
+        logger.info("Skipping LLM judge (--no-judge).")
+    elif not summary_pairs:
+        logger.info("Skipping LLM judge — no summaries available.")
+
+    # ── Filter summary_pairs to exclude 'skip' papers before architecture #
+    # Saves LLM tokens: papers the judge deems off-topic don't need deep  #
+    # architecture analysis.                                               #
+    if judge_map:
+        before = len(summary_pairs)
+        summary_pairs = [
+            (sp, s) for sp, s in summary_pairs
+            if judge_map.get(sp.paper.title, JudgeResult(paper_title=sp.paper.title)).recommended_action != "skip"
+            or judge_map.get(sp.paper.title, JudgeResult(paper_title=sp.paper.title)).judge_failed
+        ]
+        skipped = before - len(summary_pairs)
+        if skipped:
+            logger.info(
+                "Excluded %d 'skip' papers from architecture analysis "
+                "(%d remain).", skipped, len(summary_pairs),
+            )
+
+    # ------------------------------------------------------------------ #
+    # 8b. Architecture analysis  (now runs on judge-filtered papers only) #
     # ------------------------------------------------------------------ #
     arch_triples_by_topic: dict[str, tuple] = {}
 
@@ -477,8 +557,8 @@ def _run_analyze_steps(
 
     if run_architecture:
         logger.info(
-            "Running architecture analysis on top %d papers …",
-            cfg.analyze_top_n,
+            "Running architecture analysis on %d papers …",
+            len(summary_pairs),
         )
         arch_analyzer = ArchitectureAnalyzer(cfg)
         arch_triples = arch_analyzer.analyze(summary_pairs, parsed_map=parsed_map)
@@ -504,30 +584,6 @@ def _run_analyze_steps(
             logger.info("Skipping architecture analysis — no summaries available.")
         elif args.no_architecture:
             logger.info("Skipping architecture analysis (--no-architecture).")
-
-    # ------------------------------------------------------------------ #
-    # 8b. LLM-as-Judge                                                    #
-    # ------------------------------------------------------------------ #
-    judge_map: dict[str, JudgeResult] = {}
-    run_judge = (
-        not args.no_judge
-        and bool(summary_pairs)
-        and bool(cfg.anthropic_api_key)
-    )
-    if run_judge:
-        logger.info("Running LLM judge on top %d papers …", cfg.judge_top_n)
-        judge = LLMJudge(cfg)
-        judge_triples = judge.judge_papers(summary_pairs)
-        judge_map = {sp.paper.title: jr for sp, _, jr in judge_triples}
-        failed_j = sum(1 for _, _, jr in judge_triples if jr.judge_failed)
-        logger.info(
-            "Judge complete: %d assessed, %d failed",
-            len(judge_triples) - failed_j, failed_j,
-        )
-    elif args.no_judge:
-        logger.info("Skipping LLM judge (--no-judge).")
-    elif not summary_pairs:
-        logger.info("Skipping LLM judge — no summaries available.")
 
     # ------------------------------------------------------------------ #
     # 9. Concept graph + reading path + field guide (per topic)           #

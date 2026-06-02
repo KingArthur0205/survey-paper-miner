@@ -40,6 +40,7 @@ _JUDGE_SCHEMA = """
   "authority_assessment": "foundational | current_standard | emerging | not_a_survey",
   "scope_clarity": "broad | narrow | unclear",
   "coverage_depth": "comprehensive | partial | shallow",
+  "topic_relevance": 4,
   "strengths": ["strength 1", "strength 2"],
   "weaknesses": ["weakness 1"],
   "recommended_action": "must_read | worth_reading | optional | skip",
@@ -48,12 +49,20 @@ _JUDGE_SCHEMA = """
 """.strip()
 
 _SYSTEM = (
-    "You are an expert academic reviewer assessing the authority and reading priority "
-    "of survey/review papers in AI. "
-    "Return ONLY valid JSON matching the schema given. "
+    "You are an expert academic reviewer assessing survey/review papers in AI. "
+    "When research topics are provided, your PRIMARY duty is to assess how specifically "
+    "this paper addresses those exact topics — not just whether it is a good paper. "
+    "topic_relevance scale: "
+    "1=completely off-topic (different domain or application area), "
+    "2=tangential (shares some keywords but core focus is elsewhere), "
+    "3=related but not specific (covers the general area, not the exact topic), "
+    "4=directly relevant (clearly about this topic), "
+    "5=exactly this topic (the paper is precisely about what was asked for). "
+    "Rules: "
+    "If topic_relevance <= 2, set recommended_action to 'skip'. "
     "If is_survey is false, set recommended_action to 'skip'. "
     "If the abstract is under 100 words, set confidence to at most 0.5. "
-    "Do not invent information not present in the input."
+    "Return ONLY valid JSON. Do not invent information not in the input."
 )
 
 
@@ -72,6 +81,7 @@ class LLMJudge:
             raise ValueError("ANTHROPIC_API_KEY is not set — cannot run LLM judge.")
         self._client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
         self._top_n = cfg.judge_top_n
+        self._topics = cfg.topics          # used in every judge prompt
         self._cache = LLMCache(_CACHE_DIR)
 
     def judge_papers(
@@ -116,10 +126,13 @@ class LLMJudge:
 
     def _judge_one(self, sp: ScoredPaper, summary: PaperSummary) -> JudgeResult:
         # Cache key: title + abstract + research_scope (scope captures summary quality)
+        # Topics are included in the cache key so that judging the same paper
+        # for a different research topic always triggers a fresh assessment.
         cache_key = LLMCache.make_key(
             sp.paper.title,
             sp.paper.abstract or "",
             summary.research_scope or "",
+            "|".join(sorted(self._topics)),
             _MODEL,
         )
         cached = self._cache.get(cache_key)
@@ -127,7 +140,7 @@ class LLMJudge:
             logger.info("  ↩ cache hit — skipping judge for '%s'", sp.paper.title[:70])
             return _build_result(sp.paper.title, cached)
 
-        prompt = _build_prompt(sp.paper, summary)
+        prompt = _build_prompt(sp.paper, summary, self._topics)
         for attempt in range(2):
             try:
                 resp = self._client.messages.create(
@@ -172,11 +185,20 @@ class LLMJudge:
 # Prompt builder
 # ---------------------------------------------------------------------------
 
-def _build_prompt(paper: Paper, summary: PaperSummary) -> str:
+def _build_prompt(paper: Paper, summary: PaperSummary, topics: list[str]) -> str:
     abstract = paper.abstract or ""
     word_count = len(abstract.split())
 
-    lines = [
+    lines: list[str] = []
+
+    # Lead with the target topics so the model weights relevance first
+    if topics:
+        lines.append("Research topics being investigated:")
+        for t in topics:
+            lines.append(f"  - {t}")
+        lines.append("")
+
+    lines += [
         f"Title: {paper.title}",
         f"Year: {paper.year or 'Unknown'}",
         f"Venue: {paper.venue or 'Unknown'}",
@@ -197,7 +219,8 @@ def _build_prompt(paper: Paper, summary: PaperSummary) -> str:
             lines.append(f"Taxonomy: {', '.join(summary.taxonomy[:5])}")
 
     lines.append(
-        f"\nAssess this paper's authority and reading priority. "
+        f"\nAssess how relevant this paper is to the research topics above, "
+        f"and its overall authority. "
         f"Return JSON matching:\n{_JUDGE_SCHEMA}"
     )
     return "\n".join(lines)
@@ -208,12 +231,20 @@ def _build_prompt(paper: Paper, summary: PaperSummary) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_result(title: str, data: dict) -> JudgeResult:
+    # Clamp topic_relevance to the 1-5 scale in case the model drifts
+    raw_relevance = data.get("topic_relevance", 3)
+    try:
+        topic_relevance = max(1, min(5, int(raw_relevance)))
+    except (TypeError, ValueError):
+        topic_relevance = 3
+
     return JudgeResult(
         paper_title=title,
         is_survey=bool(data.get("is_survey", True)),
         authority_assessment=str(data.get("authority_assessment", "")),
         scope_clarity=str(data.get("scope_clarity", "")),
         coverage_depth=str(data.get("coverage_depth", "")),
+        topic_relevance=topic_relevance,
         strengths=[str(s) for s in (data.get("strengths") or [])],
         weaknesses=[str(w) for w in (data.get("weaknesses") or [])],
         recommended_action=str(data.get("recommended_action", "")),

@@ -61,6 +61,11 @@ class ScoredPaper(BaseModel):
     structure_signal_score: float = 0.0
     canonical_score_component: float = 0.0  # from CanonicalSurveyDetector, 20 pts
 
+    # Set after LLM-as-Judge; combines quality_score with judge bonuses/penalties.
+    # Papers the judge marks as off-topic or non-survey score much lower here.
+    # Used for final ranking in all exports.  0.0 = not yet judged.
+    judge_adjusted_score: float = 0.0
+
 
 class PaperSummary(BaseModel):
     """Structured summary produced by the LLM for one paper."""
@@ -115,6 +120,11 @@ class JudgeResult(BaseModel):
 
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
+
+    # How specifically this paper addresses the configured research topics.
+    # 1 = completely off-topic  2 = tangential  3 = related but not specific
+    # 4 = directly relevant     5 = exactly this topic
+    topic_relevance: int = 3
 
     # "must_read" | "worth_reading" | "optional" | "skip"
     recommended_action: str = ""
