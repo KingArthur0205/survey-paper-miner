@@ -32,18 +32,31 @@ _MODEL = "claude-haiku-4-5-20251001"
 _BATCH_SIZE = 20
 
 _SYSTEM_PROMPT = (
-    "You are a relevance classifier for academic paper searches. "
-    "Given a list of papers and a set of research topics, classify each paper "
-    "as RELEVANT or NOT RELEVANT.\n\n"
-    "A paper is RELEVANT if it is a survey, review, overview, taxonomy, or "
-    "systematic literature review that is primarily about one or more of the "
-    "given topics.\n\n"
-    "A paper is NOT RELEVANT if:\n"
-    "- It is about a completely different domain (e.g. medical imaging when the "
-    "topics are about education), even if it shares some keywords.\n"
-    "- It is a primary research paper introducing a new method, not a survey.\n\n"
-    "Return ONLY a JSON array of booleans (true = relevant, false = not relevant), "
-    "one per paper, in the same order as the input. No explanation, no prose."
+    "You are a strict topical relevance filter for an academic paper search pipeline. "
+    "Your job is to remove papers that do not specifically survey the given research topics. "
+    "Be conservative: when uncertain, filter out (false). It is better to miss a borderline "
+    "paper than to keep noise.\n\n"
+
+    "Mark TRUE only when ALL of the following hold:\n"
+    "1. The paper IS a survey, review, overview, taxonomy, or systematic literature review "
+    "(not a primary research paper introducing a new method or model).\n"
+    "2. The paper's CORE SUBJECT is one of the given research topics — not merely a "
+    "domain that applies the technology, or a tool that uses it as a component.\n\n"
+
+    "Always mark FALSE for:\n"
+    "- Tool / framework papers that USE the technology for a different purpose.\n"
+    "  Example: 'LatteReview: A Multi-Agent Framework for Conducting Systematic Reviews' "
+    "  uses agents as a mechanism to run reviews — it does NOT survey agentic AI or RAG.\n"
+    "- Domain-specific application papers when the topic is not that domain.\n"
+    "  Example: 'RAG for Biomedical Question Answering' is NOT relevant to a general "
+    "'Agentic RAG' or 'Retrieval-Augmented Generation' topic.\n"
+    "  Example: 'Agentic AI in Remote Sensing' is NOT relevant to 'Agentic RAG'.\n"
+    "- Papers that only mention the topic in passing or use it as a baseline.\n"
+    "- Primary research papers that propose a new system, model, or algorithm.\n"
+    "- Papers about a clearly different topic that shares surface-level keywords.\n\n"
+
+    "Return ONLY a JSON array of booleans, one per paper, in the same order as the input. "
+    "No explanation, no prose, no markdown."
 )
 
 
@@ -144,11 +157,12 @@ def _classify_batch(
         )
 
     prompt = (
-        f"Research topics of interest:\n{topics_text}\n\n"
-        f"Papers to classify:\n\n"
+        f"Research topics being surveyed:\n{topics_text}\n\n"
+        f"For each paper below, answer: does this paper SURVEY one of the topics above "
+        f"as its primary subject? (true) Or is it off-topic, domain-specific, a tool paper, "
+        f"or primary research? (false)\n\n"
         + "\n\n".join(paper_blocks)
-        + f"\n\nReturn a JSON array of {len(papers)} booleans "
-        "(true = relevant to the topics above, false = not relevant)."
+        + f"\n\nReturn a JSON array of exactly {len(papers)} booleans in input order."
     )
 
     try:
