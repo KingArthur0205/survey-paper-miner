@@ -163,6 +163,31 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
     return path
 
 
+def _pick_directory(initial: str) -> str | None:
+    """
+    Open a native OS directory-picker dialog and return the chosen path,
+    or None if the user cancelled.
+
+    Uses tkinter's filedialog — available on macOS, Windows, and Linux
+    (install python3-tk on Linux if missing).  The dialog is raised to the
+    front with wm_attributes so it doesn't hide behind the browser window.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()                         # hide the empty Tk root window
+        root.wm_attributes("-topmost", True)    # raise dialog above other windows
+        chosen = filedialog.askdirectory(
+            title="Select output directory",
+            initialdir=initial if Path(initial).is_dir() else ".",
+        )
+        root.destroy()
+        return chosen or None
+    except Exception:
+        return None
+
+
 def _build_cmd(run_cfg: dict, config_path: str) -> list[str]:
     cmd = [sys.executable, str(PROJECT_ROOT / "main.py"), run_cfg["mode"]]
     cmd += ["--config",      config_path]
@@ -194,6 +219,7 @@ _STATE_DEFAULTS: dict = {
     "running": False, "finished": False,
     "log_lines": [], "returncode": None,
     "run_cfg": None, "tmp_dir": None,
+    "output_dir": None,   # set from DEFAULTS after they load
 }
 for _k, _v in _STATE_DEFAULTS.items():
     if _k not in st.session_state:
@@ -203,6 +229,10 @@ DEFAULTS = _load_defaults()
 env_keys  = _load_env()
 has_anthropic = bool(env_keys["anthropic"])
 has_core      = bool(env_keys["core"])
+
+# Seed output_dir from config on first load (None means not yet initialised)
+if st.session_state["output_dir"] is None:
+    st.session_state["output_dir"] = DEFAULTS["output_dir"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,7 +359,7 @@ with c2:
 with c3:
     max_results = st.number_input(
         "Results per query",
-        min_value=10, max_value=200,
+        min_value=10, max_value=500,
         value=max(int(DEFAULTS["max_results"]), 50), step=10,
         help="How many papers each source returns per search query. "
              "With 10 queries per topic and 2 sources this caps the raw pool at "
@@ -460,7 +490,38 @@ st.divider()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── SECTION 5 — ADVANCED (collapsed by default) ──────────────────────────────
+# ── SECTION 5 — OUTPUT DIRECTORY ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<p class="sec">Output Directory</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="hint">Results are saved here. Each run creates a new dated sub-folder '
+    '(e.g. <code>computer-vision_2026-05-28/</code>) so previous outputs are never overwritten.</p>',
+    unsafe_allow_html=True,
+)
+
+dir_col, btn_col = st.columns([5, 1])
+with dir_col:
+    output_dir = st.text_input(
+        "output_dir_field",
+        value=st.session_state["output_dir"],
+        placeholder="data/exports",
+        label_visibility="collapsed",
+    )
+    # Keep state in sync when the user edits the path manually
+    st.session_state["output_dir"] = output_dir
+with btn_col:
+    st.write("")   # nudge button down to align with the text input
+    if st.button("📂 Browse", use_container_width=True, help="Open a folder picker"):
+        picked = _pick_directory(output_dir)
+        if picked:
+            st.session_state["output_dir"] = picked
+            st.rerun()
+
+st.divider()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SECTION 6 — ADVANCED (collapsed by default) ──────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 papers_file_default = "data/processed/papers_scored.jsonl"
 
@@ -496,13 +557,6 @@ with st.expander("⚙️  Advanced Settings", expanded=False):
     st.markdown("**Storage paths**")
     col_p1, col_p2 = st.columns(2)
     with col_p1:
-        output_dir = st.text_input(
-            "Output directory",
-            value=DEFAULTS["output_dir"],
-            help="Base folder for run sub-directories. Each run creates a new dated "
-                 "sub-folder, e.g. data/exports/computer-vision_2026-05-28/, "
-                 "so previous outputs are never overwritten.",
-        )
         db_path = st.text_input(
             "SQLite database",
             value="data/processed/papers.db",
@@ -699,4 +753,5 @@ if st.session_state.finished:
     if st.button("🔄  Start a new run", use_container_width=False):
         for k, v in _STATE_DEFAULTS.items():
             st.session_state[k] = v if not isinstance(v, list) else []
+        st.session_state["output_dir"] = DEFAULTS["output_dir"]   # re-seed from config
         st.rerun()
