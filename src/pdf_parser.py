@@ -33,10 +33,14 @@ from .models import ParsedPaper, ScoredPaper
 
 logger = logging.getLogger(__name__)
 
-_ARXIV_DELAY = 3.0      # seconds between arXiv PDF downloads
+_ARXIV_DELAY = 3.0         # seconds between arXiv PDF downloads
 _HTTP_TIMEOUT_ARXIV = 30   # arXiv is reliable — give it full time
 _HTTP_TIMEOUT_OTHER = 15   # non-arXiv sources get a shorter leash
+_HTTP_TIMEOUT_META  = 8    # Unpaywall / S2 metadata lookups — should be fast
 _last_arxiv_download: float = 0.0
+
+# Email sent with Unpaywall requests (required by their polite-pool policy).
+_UNPAYWALL_EMAIL = "survey-miner@example.com"
 
 # Suppress pdfminer rendering noise (invalid float color values in malformed PDFs)
 # These warnings are harmless — pdfplumber still extracts text correctly.
@@ -83,10 +87,18 @@ def parse_papers(
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, ParsedPaper] = {}
+    no_url: list[str] = []
+
     for sp in scored_papers:
         p = sp.paper
         pdf_url = _resolve_pdf_url(p)
         if not pdf_url:
+            no_url.append(p.title)
+            result[p.title] = ParsedPaper(
+                paper_title=p.title,
+                parse_failed=True,
+                failure_reason="No open-access PDF found (no arXiv ID, no OA link from OpenAlex/Unpaywall/S2)",
+            )
             continue
         try:
             parsed = parse_paper(p.title, pdf_url, cache_dir, is_arxiv=bool(p.arxiv_id))
@@ -98,6 +110,13 @@ def parse_papers(
                 parse_failed=True,
                 failure_reason=str(exc),
             )
+
+    if no_url:
+        logger.info(
+            "[pdf_parser] %d paper(s) have no open-access PDF — skipping full-text parse: %s",
+            len(no_url),
+            "; ".join(t[:50] for t in no_url[:5]) + ("…" if len(no_url) > 5 else ""),
+        )
     return result
 
 
@@ -155,23 +174,115 @@ def parse_paper(
 
 def _resolve_pdf_url(paper) -> str | None:
     """
-    Return the best PDF URL for a paper, or None if not available.
+    Return the best PDF URL for a paper, trying multiple sources in order.
 
-    Priority order:
-      1. arXiv PDF (arxiv_id present) — open access, bot-friendly, reliable.
-      2. Stored pdf_url — used only when no arXiv ID is available.
-         URLs from known paywall domains are skipped to avoid wasted attempts.
+    Priority:
+      1. arXiv PDF          — always open-access, bot-friendly, reliable.
+      2. Stored pdf_url     — from OpenAlex best_oa_location.
+      3. Unpaywall API      — resolves open-access PDFs by DOI; covers
+                             many papers that OpenAlex hasn't indexed as OA.
+      4. Semantic Scholar   — has its own OA PDF index; useful when neither
+                             OpenAlex nor Unpaywall has a link.
+
+    Blocked domains are rejected at every step to avoid wasted attempts.
     """
+    def _not_blocked(url: str) -> bool:
+        return not any(d in url for d in _BLOCKED_DOMAINS)
+
+    # 1. arXiv
     if paper.arxiv_id:
         return f"https://arxiv.org/pdf/{paper.arxiv_id}.pdf"
-    if paper.pdf_url:
-        if any(d in paper.pdf_url for d in _BLOCKED_DOMAINS):
-            logger.debug(
-                "[pdf_parser] Skipping paywalled URL for '%s': %s",
-                paper.title[:60], paper.pdf_url[:80],
-            )
-            return None
+
+    # 2. OpenAlex best_oa_location
+    if paper.pdf_url and _not_blocked(paper.pdf_url):
         return paper.pdf_url
+
+    if paper.pdf_url:
+        logger.debug(
+            "[pdf_parser] Skipping paywalled URL for '%s': %s",
+            paper.title[:60], paper.pdf_url[:80],
+        )
+
+    # 3. Unpaywall (needs a DOI)
+    if paper.doi:
+        url = _unpaywall_pdf_url(paper.doi)
+        if url and _not_blocked(url):
+            logger.debug("[pdf_parser] Unpaywall hit for '%s'", paper.title[:60])
+            return url
+
+    # 4. Semantic Scholar open-access index
+    url = _semantic_scholar_pdf_url(paper.doi, getattr(paper, "arxiv_id", None))
+    if url and _not_blocked(url):
+        logger.debug("[pdf_parser] Semantic Scholar hit for '%s'", paper.title[:60])
+        return url
+
+    return None
+
+
+def _unpaywall_pdf_url(doi: str) -> str | None:
+    """
+    Query the Unpaywall API for an open-access PDF link.
+
+    Unpaywall is free and requires only a valid email in the query string.
+    Returns the `url_for_pdf` from the best OA location, or None.
+    API docs: https://unpaywall.org/products/api
+    """
+    _NO_PROXY = {"http": None, "https": None}
+    url = f"https://api.unpaywall.org/v2/{doi}?email={_UNPAYWALL_EMAIL}"
+    try:
+        resp = requests.get(url, timeout=_HTTP_TIMEOUT_META, proxies=_NO_PROXY)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Prefer best_oa_location; fall back to scanning all oa_locations
+        for loc in [data.get("best_oa_location")] + (data.get("oa_locations") or []):
+            if not loc:
+                continue
+            pdf = loc.get("url_for_pdf")
+            if pdf:
+                return pdf
+    except Exception as exc:
+        logger.debug("[pdf_parser] Unpaywall lookup failed for DOI %s: %s", doi, exc)
+    return None
+
+
+def _semantic_scholar_pdf_url(doi: str | None, arxiv_id: str | None) -> str | None:
+    """
+    Query the Semantic Scholar Graph API for an open-access PDF link.
+
+    Prefers DOI lookup; falls back to arXiv ID.  No API key required for
+    low-volume use.
+    API docs: https://api.semanticscholar.org/graph/v1
+    """
+    _NO_PROXY = {"http": None, "https": None}
+    _S2_BASE = "https://api.semanticscholar.org/graph/v1/paper"
+
+    paper_id: str | None = None
+    if doi:
+        paper_id = f"DOI:{doi}"
+    elif arxiv_id:
+        paper_id = f"ArXiv:{arxiv_id}"
+
+    if not paper_id:
+        return None
+
+    try:
+        resp = requests.get(
+            f"{_S2_BASE}/{paper_id}",
+            params={"fields": "openAccessPdf"},
+            timeout=_HTTP_TIMEOUT_META,
+            proxies=_NO_PROXY,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        oa = data.get("openAccessPdf") or {}
+        return oa.get("url") or None
+    except Exception as exc:
+        logger.debug("[pdf_parser] S2 lookup failed for %s: %s", paper_id, exc)
     return None
 
 
