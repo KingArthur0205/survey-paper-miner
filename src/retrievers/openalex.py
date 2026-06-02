@@ -9,6 +9,9 @@ Notes:
 - Citation counts (cited_by_count) are kept up-to-date daily by OpenAlex.
 - All metadata is returned verbatim from OpenAlex — nothing is invented.
 - DOIs and external IDs (arXiv) are normalised where available.
+- OpenAlex caps results at 200 per page.  When limit > 200 this retriever
+  uses cursor-based pagination to collect up to `limit` papers across
+  multiple requests.
 """
 
 from __future__ import annotations
@@ -22,9 +25,12 @@ from .base import BaseRetriever
 logger = logging.getLogger(__name__)
 
 _SEARCH_URL = "https://api.openalex.org/works"
+_PAGE_SIZE   = 200        # OpenAlex hard maximum per request
+_MAILTO      = "survey-miner@example.com"
 
-# OpenAlex "mailto" polite pool — reduces rate limit risk
-_MAILTO = "survey-miner@example.com"
+# Polite delay between paginated requests (seconds).
+# OpenAlex asks for ≤ 10 req/s in the polite pool; 0.15 s keeps us well under.
+_PAGE_DELAY  = 0.15
 
 
 class OpenAlexRetriever(BaseRetriever):
@@ -38,15 +44,21 @@ class OpenAlexRetriever(BaseRetriever):
         year_to: int,
         limit: int,
     ) -> list[Paper]:
-        params: dict = {
+        """
+        Fetch up to `limit` papers from OpenAlex.
+
+        OpenAlex returns at most 200 results per page.  When `limit` exceeds
+        200 the retriever automatically paginates using cursor-based iteration
+        (cursor=* on the first request, then the value of meta.next_cursor on
+        each subsequent request) until `limit` papers have been collected or
+        there are no more results.
+        """
+        base_params: dict = {
             "search": query,
             "filter": f"publication_year:{year_from}-{year_to}",
-            "per-page": min(limit, 200),  # OpenAlex max is 200
-            # Use relevance_score so each query surfaces its best *semantic*
-            # match rather than the globally most-cited papers in the date
-            # window.  cited_by_count would cause every query to return the
-            # same handful of mega-cited papers, making deduplication collapse
-            # 10 queries × 50 results into ~50 unique papers instead of ~400.
+            "per-page": _PAGE_SIZE,
+            # relevance_score gives diverse results per query rather than the
+            # same globally-most-cited papers on every query.
             "sort": "relevance_score:desc",
             "select": (
                 "id,title,publication_year,authorships,primary_location,"
@@ -56,18 +68,32 @@ class OpenAlexRetriever(BaseRetriever):
             "mailto": _MAILTO,
         }
 
-        data = self._get(_SEARCH_URL, params=params)
+        papers: list[Paper] = []
+        cursor: str | None = "*"   # sentinel value for the first page
+        page = 0
 
-        papers = []
-        for item in data.get("results", []):
-            paper = _parse_item(item, topic, query)
-            if paper:
-                papers.append(paper)
+        while cursor and len(papers) < limit:
+            params = {**base_params, "cursor": cursor}
+            data   = self._get(_SEARCH_URL, params=params)
 
-        time.sleep(0.2)
+            for item in data.get("results", []):
+                paper = _parse_item(item, topic, query)
+                if paper:
+                    papers.append(paper)
+                    if len(papers) >= limit:
+                        break
+
+            # OpenAlex returns the next cursor in meta.next_cursor; None / ""
+            # means we have reached the last page.
+            cursor = (data.get("meta") or {}).get("next_cursor") or None
+            page  += 1
+
+            if cursor and len(papers) < limit:
+                time.sleep(_PAGE_DELAY)
 
         logger.info(
-            "[openalex] query=%r  returned %d papers", query, len(papers)
+            "[openalex] query=%r  returned %d papers (%d page%s)",
+            query, len(papers), page, "s" if page != 1 else "",
         )
         return papers
 
