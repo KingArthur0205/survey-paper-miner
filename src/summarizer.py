@@ -124,19 +124,16 @@ class LLMSummarizer:
 
         for attempt in range(2):
             try:
-                response = self._client.messages.create(
+                # Streaming is required for max_tokens values that may exceed 10 k.
+                # We use it here unconditionally for consistency and to avoid the
+                # "Streaming required" error if the schema grows.
+                with self._client.messages.stream(
                     model=_MODEL,
-                    max_tokens=1024,
+                    max_tokens=4096,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
-                )
-                raw_text = response.content[0].text.strip()
-
-                # Strip markdown code fences if the model wraps JSON in them
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("```")[1]
-                    if raw_text.startswith("json"):
-                        raw_text = raw_text[4:]
+                ) as stream:
+                    raw_text = _strip_fences(stream.get_final_text())
 
                 data = json.loads(raw_text)
                 self._cache.set(cache_key, data, label=paper.title[:70], model=_MODEL)
@@ -144,6 +141,15 @@ class LLMSummarizer:
 
             except json.JSONDecodeError as e:
                 if attempt == 0:
+                    # Try to salvage a truncated response before retrying
+                    repaired = _repair_truncated_json(raw_text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Repaired truncated JSON for '%s' (attempt 1)",
+                            paper.title[:60],
+                        )
+                        self._cache.set(cache_key, repaired, label=paper.title[:70], model=_MODEL)
+                        return _build_summary(paper.title, repaired)
                     logger.warning(
                         "JSON decode error for '%s' (attempt 1), retrying. Error: %s",
                         paper.title[:60], e,
@@ -163,7 +169,6 @@ class LLMSummarizer:
                     failure_reason=str(e),
                 )
 
-        # Should be unreachable, but satisfy the type checker
         return PaperSummary(
             paper_title=paper.title,
             summarization_failed=True,
@@ -219,3 +224,61 @@ def _as_list(val) -> list[str]:
     if isinstance(val, list):
         return [str(x) for x in val]
     return [str(val)]
+
+
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences that the model sometimes wraps JSON in."""
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return text.strip()
+
+
+def _repair_truncated_json(text: str) -> dict | None:
+    """
+    Attempt to close a JSON object that was cut off mid-stream.
+
+    Walks the text character-by-character tracking bracket depth and string
+    state, then appends the minimum closing brackets to make it valid JSON.
+    Returns the parsed dict on success, or None if it cannot be repaired.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    last_comma_depth1 = -1
+    stack_at_last_comma: list[str] = []
+
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ("{", "["):
+            stack.append(ch)
+        elif ch in ("}", "]"):
+            if stack:
+                stack.pop()
+        elif ch == "," and len(stack) == 1:
+            last_comma_depth1 = i
+            stack_at_last_comma = stack.copy()
+
+    if last_comma_depth1 == -1:
+        return None
+
+    trimmed = text[:last_comma_depth1].rstrip()
+    closers = {"{": "}", "[": "]"}
+    suffix = "".join(closers[s] for s in reversed(stack_at_last_comma))
+    try:
+        return json.loads(trimmed + suffix)
+    except Exception:
+        return None
