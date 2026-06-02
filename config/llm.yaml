@@ -1,0 +1,20 @@
+# LLM, judge, and gap-detection settings
+# All values here can be overridden via CLI --overrides in main.py.
+
+# ── Canonical Survey Detector ────────────────────────────────────────────────
+# Set to false to skip canonical score computation (scores remain 0.0).
+canonical_detector_enabled: true
+
+# ── LLM-as-Judge ────────────────────────────────────────────────────────────
+# How many of the top summarised papers to assess with the judge LLM pass.
+# Reduce to lower API cost; increase for more comprehensive coverage.
+judge_top_n: 50
+
+# ── Research-Gap Detection ───────────────────────────────────────────────────
+# Minimum number of survey papers that must mention a topic for it to be
+# counted as a "frequency gap" (widely covered = well-known gap).
+gap_min_surveys: 3
+
+# Fraction of all survey papers in a topic that must mention a future direction
+# for it to be classified as a "frequency convergence" gap.
+gap_frequency_threshold: 0.3

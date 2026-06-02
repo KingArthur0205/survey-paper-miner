@@ -1,0 +1,17 @@
+year_from: 2022       # LLM-in-education is mostly a post-ChatGPT phenomenon
+year_to: 2026
+max_results_per_query: 500
+top_n_to_summarize: 30
+
+# LLM-in-education papers are newer → fewer citations → lower threshold
+min_quality_score: 15
+
+survey_terms:
+  - survey
+  - review
+  - systematic review
+  - systematic literature review
+
+topics:
+  # Broad catch-all — captures the main survey body
+  - Computer Vision

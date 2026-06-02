@@ -1,0 +1,1576 @@
+"""
+Exporter.
+
+Writes output files for each pipeline run into a dedicated folder:
+
+  <output_dir>/<topic-slug>_<date>/
+      papers_ranked.xlsx   — rich Excel workbook (two sheets)
+      papers_ranked.csv    — plain CSV for scripting / pandas
+      paper_summaries.jsonl — one JSON object per summarised paper
+      survey_report.md     — Markdown report grouped by topic
+
+The run folder name is derived from the configured topics + today's date so
+each run is stored separately and old results are never overwritten.
+
+Excel workbook sheets:
+  "Ranked Papers"  — all scored papers, one row each, sortable columns
+  "Summaries"      — top-N papers that received LLM summaries, with full
+                     findings, scope, taxonomy etc. in readable columns
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import re
+import shutil
+import subprocess
+from collections import defaultdict
+from datetime import date
+from pathlib import Path
+
+from .models import (
+    ConceptGraph,
+    FieldGuide,
+    FieldMegaArchitecture,
+    JudgeResult,
+    Paper,
+    PaperArchitecture,
+    PaperSummary,
+    ReadingPath,
+    ScoredPaper,
+)
+
+logger = logging.getLogger(__name__)
+
+# Columns written to both the CSV and the "Ranked Papers" XLSX sheet
+_PAPER_COLUMNS = [
+    "rank",
+    "title",
+    "year",
+    "venue",
+    "authors",
+    "topic_queries",
+    "citation_count",
+    "influential_citation_count",
+    "background_citation_count",
+    "influential_ratio",
+    "canonical_score",
+    "authority_tier",
+    "llm_authority_assessment",
+    "recommended_action",
+    "orientation",
+    "quality_score",
+    "doi",
+    "arxiv_id",
+    "url",
+    "pdf_url",
+    "abstract",
+    "sources",
+]
+
+# Columns written to the "Summaries" XLSX sheet
+_SUMMARY_COLUMNS = [
+    "rank",
+    "title",
+    "year",
+    "venue",
+    "quality_score",
+    "research_scope",
+    "core_problem",
+    "taxonomy",
+    "main_methods",
+    "main_findings",
+    "limitations",
+    "future_directions",
+    "datasets_and_benchmarks",
+    "url",
+    "doi",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_run_dir(topics: list[str], base_dir: Path) -> Path:
+    """
+    Return (and create) a uniquely-named subdirectory for this run.
+
+    Name format: <topic-slug>[_<topic-slug>...]_YYYY-MM-DD[_N]
+    e.g. "ai-computer-science-education_machine-learning_2026-05-20"
+
+    If the directory already exists a counter suffix is appended so old runs
+    are never overwritten.
+    """
+    slugs = [_topic_slug(t) for t in topics[:3]]   # max 3 topics in name
+    if len(topics) > 3:
+        slugs.append(f"and-{len(topics) - 3}-more")
+    date_str = date.today().isoformat()
+    stem = "_".join(slugs) + "_" + date_str
+
+    folder = base_dir / stem
+    if not folder.exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    # Append incrementing counter to avoid clobbering an earlier run today
+    counter = 2
+    while True:
+        candidate = base_dir / f"{stem}_{counter}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        counter += 1
+
+
+def _topic_slug(topic: str) -> str:
+    """'AI for computer science education' → 'ai-computer-science-education'"""
+    _STOPWORDS = {"for", "in", "of", "the", "a", "an", "and", "or", "with", "on"}
+    words = re.sub(r"[^\w\s]", "", topic.lower()).split()
+    significant = [w for w in words if w not in _STOPWORDS][:4]
+    return "-".join(significant) or "topic"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exporter
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Exporter:
+    def __init__(self, output_dir: str | Path):
+        self._output_dir = Path(output_dir)
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _topic_dir(self, topic: str) -> Path:
+        """Return (and create) a per-topic sub-folder inside the run directory."""
+        d = self._output_dir / _topic_slug(topic)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def export_xlsx(
+        self,
+        scored_papers: list[ScoredPaper],
+        summary_pairs: list[tuple[ScoredPaper, PaperSummary]],
+    ) -> Path:
+        """
+        Write a two-sheet Excel workbook.
+
+        Sheet 1 "Ranked Papers" — every scored paper, all columns.
+        Sheet 2 "Summaries"     — only papers that have LLM summaries.
+        """
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            logger.warning(
+                "openpyxl not installed — skipping XLSX export. "
+                "Run: pip install openpyxl"
+            )
+            return self._output_dir / "papers_ranked.xlsx"
+
+        path = self._output_dir / "papers_ranked.xlsx"
+        wb = openpyxl.Workbook()
+
+        # ── Sheet 1: Ranked Papers ──────────────────────────────────────
+        ws1 = wb.active
+        ws1.title = "Ranked Papers"
+        _write_sheet(
+            ws1,
+            headers=_PAPER_COLUMNS,
+            rows=[_to_paper_row(rank, sp) for rank, sp in enumerate(scored_papers, 1)],
+            col_widths={
+                "rank": 6, "title": 60, "year": 8, "venue": 28,
+                "authors": 36, "topic_queries": 28,
+                "citation_count": 12, "influential_citation_count": 14,
+                "background_citation_count": 14, "influential_ratio": 12,
+                "canonical_score": 12, "authority_tier": 16,
+                "llm_authority_assessment": 18, "recommended_action": 16,
+                "orientation": 16,
+                "quality_score": 12, "doi": 22, "arxiv_id": 20,
+                "url": 32, "pdf_url": 32, "abstract": 70, "sources": 14,
+            },
+            url_cols={"url", "pdf_url"},
+        )
+
+        # ── Sheet 2: Summaries ─────────────────────────────────────────
+        if summary_pairs:
+            ws2 = wb.create_sheet("Summaries")
+            summary_map = {sp.paper.title: (sp, summary) for sp, summary in summary_pairs}
+            summary_rows = []
+            rank = 0
+            for sp in scored_papers:
+                if sp.paper.title in summary_map:
+                    rank += 1
+                    _, summary = summary_map[sp.paper.title]
+                    summary_rows.append(_to_summary_row(rank, sp, summary))
+            _write_sheet(
+                ws2,
+                headers=_SUMMARY_COLUMNS,
+                rows=summary_rows,
+                col_widths={
+                    "rank": 6, "title": 55, "year": 8, "venue": 24,
+                    "quality_score": 12, "research_scope": 40,
+                    "core_problem": 40, "taxonomy": 40,
+                    "main_methods": 40, "main_findings": 60,
+                    "limitations": 40, "future_directions": 40,
+                    "datasets_and_benchmarks": 36, "url": 32, "doi": 22,
+                },
+                url_cols={"url"},
+            )
+
+        wb.save(path)
+        logger.info("XLSX exported: %s (%d papers, %d summaries)",
+                    path, len(scored_papers), len(summary_pairs))
+        return path
+
+    def export_csv(
+        self,
+        scored_papers: list[ScoredPaper],
+        judge_map: dict[str, JudgeResult] | None = None,
+        arch_map: dict[str, PaperArchitecture] | None = None,
+    ) -> Path:
+        """Write all ranked papers to CSV."""
+        path = self._output_dir / "papers_ranked.csv"
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=_PAPER_COLUMNS)
+            writer.writeheader()
+            for rank, sp in enumerate(scored_papers, start=1):
+                jr = (judge_map or {}).get(sp.paper.title)
+                arch = (arch_map or {}).get(sp.paper.title)
+                writer.writerow(_to_paper_row(rank, sp, jr, arch))
+        logger.info("CSV exported: %s (%d papers)", path, len(scored_papers))
+        return path
+
+    def export_jsonl(
+        self,
+        summary_pairs: list[tuple[ScoredPaper, PaperSummary]],
+        judge_map: dict[str, JudgeResult] | None = None,
+    ) -> Path:
+        """Write one JSON object per summarised paper to JSONL."""
+        path = self._output_dir / "paper_summaries.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for sp, summary in summary_pairs:
+                p = sp.paper
+                total = max(p.citation_count, 1)
+                jr = (judge_map or {}).get(p.title)
+                record = {
+                    "title": p.title,
+                    "year": p.year,
+                    "venue": p.venue,
+                    "quality_score": sp.quality_score,
+                    "doi": p.doi,
+                    "arxiv_id": p.arxiv_id,
+                    "url": p.url,
+                    "citation_count": p.citation_count,
+                    "influential_citation_count": p.influential_citation_count,
+                    "background_citation_count": p.background_citation_count,
+                    "influential_ratio": round(p.influential_citation_count / total, 4),
+                    "canonical_score": p.canonical_score,
+                    "authority_tier": p.authority_tier,
+                    "topic_queries": p.topic_queries,
+                    "sources": p.sources,
+                    "judge": jr.to_flat_dict() if jr else None,
+                    "summary": summary.to_flat_dict(),
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        logger.info("JSONL exported: %s (%d papers)", path, len(summary_pairs))
+        return path
+
+    def export_architecture_report(
+        self,
+        topic: str,
+        arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+        mega: FieldMegaArchitecture,
+        judge_map: dict[str, JudgeResult] | None = None,
+        reading_path: "ReadingPath | None" = None,
+        concept_graph: "ConceptGraph | None" = None,
+    ) -> Path:
+        """
+        Write the full architecture report for one topic to its sub-folder.
+
+        Part 1 — Field Architecture (mega-arch, Mermaid, gaps)
+        Part 2 — Survey Navigator   (orientation map, coverage matrix, reading path)
+        Part 3 — Concept Graph      (node/edge listing; only when concept_graph is provided)
+        Part 4 — Paper Cards        (one card per paper, with anchor IDs)
+
+        All cross-references inside the file use Markdown anchor links so the
+        user can click between sections in any Markdown viewer.
+        """
+        path = self._topic_dir(topic) / "report.md"
+
+        lines: list[str] = []
+        lines += _render_part1_field_architecture(topic, mega, arch_triples)
+        lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
+        if concept_graph and not concept_graph.extraction_failed:
+            lines += _render_part3_concept_graph(concept_graph)
+        lines += _render_part4_paper_cards(arch_triples, judge_map)
+
+        path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Architecture report exported: %s (%d papers)", path, len(arch_triples))
+        return path
+
+    def export_concept_graph_json(
+        self,
+        topic: str,
+        graph: "ConceptGraph",
+    ) -> "Path | None":
+        """Write ConceptGraph as JSON.  Returns None if extraction failed."""
+        if graph.extraction_failed:
+            logger.warning(
+                "Skipping concept graph JSON for '%s' — extraction failed: %s",
+                topic, graph.failure_reason,
+            )
+            return None
+        path = self._topic_dir(topic) / "concept_graph.json"
+        path.write_text(
+            json.dumps(graph.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Concept graph JSON exported: %s (%d nodes, %d edges)", path, len(graph.nodes), len(graph.edges))
+        return path
+
+    def export_reading_path_json(
+        self,
+        topic: str,
+        reading_path: "ReadingPath",
+    ) -> "Path | None":
+        """Write ReadingPath as JSON.  Returns None if generation failed."""
+        if reading_path.generation_failed:
+            logger.warning(
+                "Skipping reading path JSON for '%s' — generation failed: %s",
+                topic, reading_path.failure_reason,
+            )
+            return None
+        path = self._topic_dir(topic) / "reading_path.json"
+        path.write_text(
+            json.dumps(reading_path.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Reading path JSON exported: %s (%d steps)", path, len(reading_path.steps))
+        return path
+
+    def export_mindmap_html(
+        self,
+        topic: str,
+        mega: FieldMegaArchitecture,
+        arch_triples: "list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]] | None" = None,
+    ) -> "Path | None":
+        """
+        Write a self-contained interactive HTML mind map using markmap.
+
+        Opens in any browser — no installation required.  Each node is enriched
+        with bold labels, `coverage` badges, italic definitions, technique lists,
+        and clickable links to the original papers.  Click any node to expand /
+        collapse its children; use the toolbar to reset view or expand all.
+
+        Returns None if synthesis failed.
+        """
+        if mega.synthesis_failed:
+            return None
+        path = self._topic_dir(topic) / "mindmap.html"
+        markdown = _build_mindmap_markdown(topic, mega, arch_triples or [])
+        html = _MINDMAP_HTML_TEMPLATE.format(topic=topic, markdown=markdown)
+        path.write_text(html, encoding="utf-8")
+        logger.info("Interactive mind map exported: %s", path)
+        return path
+
+    def export_mega_architecture_json(
+        self,
+        topic: str,
+        mega: FieldMegaArchitecture,
+    ) -> Path | None:
+        """Write FieldMegaArchitecture as JSON for programmatic consumption.
+        Returns None and skips the file if synthesis failed."""
+        if mega.synthesis_failed:
+            logger.warning(
+                "Skipping JSON export for '%s' — synthesis failed: %s",
+                topic, mega.failure_reason,
+            )
+            return None
+        path = self._topic_dir(topic) / "architecture.json"
+        path.write_text(
+            json.dumps(mega.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Architecture JSON exported: %s", path)
+        return path
+
+    def export_mega_architecture_mmd(
+        self,
+        topic: str,
+        mega: FieldMegaArchitecture,
+    ) -> Path | None:
+        """Write the Mermaid diagram as a standalone .mmd file.
+        Returns None and skips the file if synthesis failed or diagram is empty."""
+        if mega.synthesis_failed or not mega.mermaid_diagram:
+            logger.warning(
+                "Skipping MMD export for '%s' — synthesis failed or no diagram.",
+                topic,
+            )
+            return None
+        topic_dir = self._topic_dir(topic)
+        mmd_path = topic_dir / "architecture.mmd"
+        mmd_path.write_text(mega.mermaid_diagram, encoding="utf-8")
+        logger.info("Mermaid diagram exported: %s", mmd_path)
+
+        png_path = topic_dir / "architecture.png"
+        _render_mermaid_png(mmd_path, png_path)
+        return mmd_path
+
+    def export_markdown(
+        self,
+        scored_papers: list[ScoredPaper],
+        summary_pairs: list[tuple[ScoredPaper, PaperSummary]],
+    ) -> Path:
+        """Write a Markdown report grouped by topic."""
+        path = self._output_dir / "survey_report.md"
+
+        summary_map: dict[str, PaperSummary] = {
+            sp.paper.title: summary for sp, summary in summary_pairs
+        }
+
+        by_topic: dict[str, list[ScoredPaper]] = defaultdict(list)
+        for sp in scored_papers:
+            topic = sp.paper.topic_queries[0] if sp.paper.topic_queries else "Uncategorised"
+            by_topic[topic].append(sp)
+
+        lines: list[str] = [
+            "# AI Survey Paper Report",
+            "",
+            f"*Generated by AI Survey Paper Miner — {len(scored_papers)} papers across "
+            f"{len(by_topic)} topics*",
+            "",
+            "---",
+            "",
+        ]
+
+        for topic, papers in sorted(by_topic.items()):
+            lines.append(f"## {topic.title()}")
+            lines.append("")
+            lines.append(f"*{len(papers)} papers — ranked by quality score*")
+            lines.append("")
+            for rank, sp in enumerate(papers, start=1):
+                lines += _paper_section(rank, sp, summary_map.get(sp.paper.title))
+
+        with path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        logger.info("Markdown report exported: %s", path)
+        return path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XLSX helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_sheet(ws, headers, rows, col_widths, url_cols=None):
+    """Write headers + rows to a worksheet with formatting."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    url_cols = url_cols or set()
+    HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+    HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
+    WRAP = Alignment(wrap_text=True, vertical="top")
+    TOP = Alignment(vertical="top")
+
+    # Write headers
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header.replace("_", " ").title())
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = TOP
+
+    ws.freeze_panes = "A2"
+
+    # Write data rows
+    for row_idx, row_dict in enumerate(rows, 2):
+        for col_idx, header in enumerate(headers, 1):
+            value = row_dict.get(header, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            # Wrap text for long fields; top-align everything
+            if header in {"abstract", "main_findings", "taxonomy",
+                          "main_methods", "limitations", "future_directions"}:
+                cell.alignment = WRAP
+            else:
+                cell.alignment = TOP
+            # Add hyperlink for URL columns
+            if header in url_cols and value and str(value).startswith("http"):
+                cell.hyperlink = str(value)
+                cell.font = Font(color="0563C1", underline="single")
+
+    # Set column widths
+    for col_idx, header in enumerate(headers, 1):
+        width = col_widths.get(header, 20)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Taller default row height for wrapped rows
+    for row_idx in range(2, len(rows) + 2):
+        ws.row_dimensions[row_idx].height = 60
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Row builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_paper_row(
+    rank: int,
+    sp: ScoredPaper,
+    jr: "JudgeResult | None" = None,
+    arch: "PaperArchitecture | None" = None,
+) -> dict:
+    p = sp.paper
+    total = max(p.citation_count, 1)
+    return {
+        "rank": rank,
+        "title": p.title,
+        "year": p.year or "",
+        "venue": p.venue or "",
+        "authors": "; ".join(p.authors[:5]),
+        "topic_queries": "; ".join(p.topic_queries),
+        "citation_count": p.citation_count,
+        "influential_citation_count": p.influential_citation_count,
+        "background_citation_count": p.background_citation_count,
+        "influential_ratio": round(p.influential_citation_count / total, 4),
+        "canonical_score": round(p.canonical_score, 4),
+        "authority_tier": p.authority_tier or "",
+        "llm_authority_assessment": jr.authority_assessment if jr and not jr.judge_failed else "",
+        "recommended_action": jr.recommended_action if jr and not jr.judge_failed else "",
+        "orientation": arch.orientation if arch and not arch.analysis_failed else "",
+        "quality_score": round(sp.quality_score, 1),
+        "doi": p.doi or "",
+        "arxiv_id": p.arxiv_id or "",
+        "url": p.url or "",
+        "pdf_url": p.pdf_url or "",
+        "abstract": (p.abstract or "").replace("\n", " "),
+        "sources": "; ".join(p.sources),
+    }
+
+
+def _to_summary_row(rank: int, sp: ScoredPaper, summary: PaperSummary) -> dict:
+    p = sp.paper
+    return {
+        "rank": rank,
+        "title": p.title,
+        "year": p.year or "",
+        "venue": p.venue or "",
+        "quality_score": round(sp.quality_score, 1),
+        "research_scope": summary.research_scope or "",
+        "core_problem": summary.core_problem or "",
+        "taxonomy": "\n".join(f"• {t}" for t in summary.taxonomy),
+        "main_methods": "\n".join(f"• {m}" for m in summary.main_methods),
+        "main_findings": "\n".join(f"• {f}" for f in summary.main_findings),
+        "limitations": "\n".join(f"• {l}" for l in summary.limitations),
+        "future_directions": "\n".join(f"• {d}" for d in summary.future_directions),
+        "datasets_and_benchmarks": "; ".join(summary.datasets_and_benchmarks),
+        "url": p.url or "",
+        "doi": p.doi or "",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Markdown helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _paper_section(rank: int, sp: ScoredPaper, summary: PaperSummary | None) -> list[str]:
+    p = sp.paper
+    lines: list[str] = []
+
+    lines.append(f"### {rank}. {p.title}")
+    lines.append("")
+    lines.append(f"- **Year:** {p.year or 'N/A'}")
+    lines.append(f"- **Venue:** {p.venue or 'N/A'}")
+    lines.append(f"- **Quality score:** {sp.quality_score}")
+    lines.append(f"- **Citations:** {p.citation_count}")
+
+    if p.url:
+        lines.append(f"- **URL:** {p.url}")
+    if p.arxiv_id:
+        lines.append(f"- **arXiv:** https://arxiv.org/abs/{p.arxiv_id}")
+
+    if summary and not summary.summarization_failed:
+        if summary.research_scope:
+            lines.append(f"- **Scope:** {summary.research_scope}")
+        if summary.core_problem:
+            lines.append(f"- **Core problem:** {summary.core_problem}")
+        if summary.taxonomy:
+            lines.append(f"- **Taxonomy:** {', '.join(summary.taxonomy[:5])}")
+        if summary.main_findings:
+            lines.append("- **Key findings:**")
+            for finding in summary.main_findings[:3]:
+                lines.append(f"  - {finding}")
+        if summary.datasets_and_benchmarks:
+            lines.append(f"- **Benchmarks:** {', '.join(summary.datasets_and_benchmarks[:5])}")
+        all_keywords = []
+        for kw_list in summary.keywords.values():
+            all_keywords.extend(kw_list[:3])
+        if all_keywords:
+            lines.append(f"- **Keywords:** {', '.join(all_keywords[:10])}")
+    elif summary and summary.summarization_failed:
+        lines.append(f"- *Summary unavailable: {summary.failure_reason}*")
+
+    lines.append("")
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Architecture report helpers  (three-part per-topic Markdown)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _anchor(text: str) -> str:
+    """Convert text to a GitHub-Flavoured-Markdown anchor fragment."""
+    slug = re.sub(r"[^\w\s-]", "", text.lower())
+    slug = re.sub(r"[\s]+", "-", slug).strip("-")
+    return slug
+
+
+def _paper_anchor(sp: ScoredPaper) -> str:
+    """Stable anchor id for a paper card (first 6 words of title + year)."""
+    words = re.sub(r"[^\w\s]", "", sp.paper.title.lower()).split()[:6]
+    slug = "-".join(words)
+    year = str(sp.paper.year or "nd")
+    return f"{slug}-{year}"
+
+
+def _render_part1_field_architecture(
+    topic: str,
+    mega: FieldMegaArchitecture,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+) -> list[str]:
+    n = len(mega.source_papers)
+    n_gaps = len(mega.open_gaps)
+    today = date.today().isoformat()
+
+    lines: list[str] = [
+        f"# {topic.title()} — Survey Report",
+        f"*Generated {today} · {n} surveys analysed · {n_gaps} research gaps identified*",
+        "",
+        "---",
+        "",
+        "## Contents",
+        "",
+        "- [Part 1 — Field Architecture](#part-1--field-architecture)",
+        "  - [Field at a Glance](#field-at-a-glance)",
+        "  - [Field Map](#field-map)",
+        "  - [Core Problems](#core-problems)",
+        "  - [Research Landscape](#research-landscape)",
+        "  - [Research Gaps](#research-gaps)",
+        "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
+        "  - [Survey Orientation Map](#survey-orientation-map)",
+        "  - [Coverage Matrix](#coverage-matrix)",
+        "  - [Reading Guide](#reading-guide-where-to-start)",
+        "- [Part 3 — Concept Graph](#part-3--concept-graph)",
+        "- [Part 4 — Paper Cards](#part-4--paper-cards)",
+        "",
+        "---",
+        "",
+        "## Part 1 — Field Architecture",
+        "",
+        "### Field at a Glance",
+        "",
+    ]
+
+    if mega.field_summary:
+        lines.append(mega.field_summary)
+        lines.append("")
+
+    # Deepest / weakest coverage bullets derived from coverage_count
+    all_methods = list(mega.method_families.items())
+    if all_methods:
+        best = sorted(all_methods, key=lambda kv: kv[1].get("coverage_count", 0), reverse=True)
+        worst = [kv for kv in best if kv[1].get("coverage_count", 0) < max(1, round(n * 0.3))]
+        if best:
+            lines.append(f"**Deepest coverage:** {' · '.join(k for k, _ in best[:3])}")
+        if worst:
+            lines.append(f"**Weakest coverage:** {' · '.join(k for k, _ in worst[:3])}")
+
+    cmp = mega.cross_survey_comparison
+    if cmp and not cmp.comparison_failed and cmp.conflicting_classifications:
+        conflict = cmp.conflicting_classifications[0]
+        lines.append(
+            f"**Most contested concept:** {conflict.get('dimension', '')} "
+            f"({conflict.get('paper_a', '')} vs {conflict.get('paper_b', '')})"
+        )
+    lines.append("")
+
+    # Mermaid diagram
+    lines += [
+        "---",
+        "",
+        "### Field Map",
+        "",
+        "```mermaid",
+        mega.mermaid_diagram or "graph TD\n    Field[\"" + topic.title() + "\"]",
+        "```",
+        "",
+        "> ⚠️ nodes are covered by fewer than 30% of analysed surveys — likely research gaps.",
+        "",
+        "---",
+        "",
+        "### Core Problems",
+        "",
+    ]
+
+    if mega.core_problems:
+        lines.append("| Problem | Surveys covering it | Best paper |")
+        lines.append("|---|---|---|")
+        for cp in mega.core_problems:
+            prob = cp.get("problem", "")
+            cnt = cp.get("coverage_count", "—")
+            best_p = cp.get("best_paper", "—")
+            anchor_match = _find_paper_anchor(best_p, arch_triples)
+            best_link = f"[{best_p}](#{anchor_match})" if anchor_match else best_p
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            lines.append(f"| {prob} | {coverage} | {best_link} |")
+    else:
+        lines.append("*No core problems extracted.*")
+    lines.append("")
+
+    # Merged Research Landscape (mainstream areas + methods + datasets + challenges)
+    lines += _render_research_landscape(mega, arch_triples)
+
+    # Research gaps
+    lines += ["---", "", "### Research Gaps", ""]
+    if mega.open_gaps:
+        for i, gap in enumerate(mega.open_gaps, 1):
+            score_str = f"{gap.opportunity_score:.2f}" if gap.opportunity_score else "—"
+            lines.append(
+                f"**Gap {i} — {gap.gap}** *(opportunity score: {score_str})*"
+            )
+            lines.append("")
+            if gap.gap_type:
+                lines.append(f"**Type:** {gap.gap_type}")
+            if gap.evidence:
+                evidence_links = []
+                for title in gap.evidence:
+                    anchor_match = _find_paper_anchor(title, arch_triples)
+                    evidence_links.append(
+                        f"[{title}](#{anchor_match})" if anchor_match else title
+                    )
+                lines.append(f"**Evidence:** {' · '.join(evidence_links)}")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+    else:
+        lines.append("*No research gaps identified.*")
+        lines.append("")
+
+    return lines
+
+
+def _render_research_landscape(
+    mega: FieldMegaArchitecture,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+) -> list[str]:
+    """
+    Merged section: Mainstream Research Areas + Methods + Datasets + Challenges.
+
+    For each method family, links to the actual papers that use it (with
+    citation counts and paper-card anchors) so readers can navigate directly
+    to the relevant literature.
+    """
+    n = len(mega.source_papers)
+    low_threshold = max(1, round(n * 0.3))
+
+    lines: list[str] = [
+        "---",
+        "",
+        "### Research Landscape",
+        "",
+        "*Mainstream research areas, methods in use, relevant benchmarks, and open challenges — "
+        "all cross-referenced to the surveyed papers below.*",
+        "",
+    ]
+
+    # ── 1. Mainstream research areas ────────────────────────────────────
+    if mega.major_tasks:
+        lines += ["#### Mainstream Research Areas", ""]
+        lines.append("| Research Area | What it studies | Surveys | Key Papers |")
+        lines.append("|---|---|---|---|")
+        for task_name, info in mega.major_tasks.items():
+            if not isinstance(info, dict):
+                continue
+            desc = str(info.get("description", "—"))
+            cnt = info.get("coverage_count", "—")
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
+
+            # Papers that cover this task (match against arch.covered_tasks)
+            task_lower = task_name.lower()
+            paper_links = []
+            for sp, _, arch in arch_triples:
+                if arch.analysis_failed:
+                    continue
+                if any(task_lower in t.lower() or t.lower() in task_lower
+                       for t in arch.covered_tasks):
+                    a = _paper_anchor(sp)
+                    cit = f" ({sp.paper.citation_count:,}✱)" if sp.paper.citation_count else ""
+                    paper_links.append(f"[{_short_title(sp.paper.title)}](#{a}){cit}")
+
+            papers_str = " · ".join(paper_links[:5]) if paper_links else "—"
+            safe_desc = desc.replace("|", "\\|")
+            lines.append(f"| **{task_name}{warn}** | {safe_desc} | {coverage} | {papers_str} |")
+        lines.append("")
+
+    # ── 2. Mainstream methods ────────────────────────────────────────────
+    if mega.method_families:
+        lines += ["#### Mainstream Methods", ""]
+        lines.append(
+            "*For each method: what it is, which benchmarks evaluate it, "
+            "and which papers use it (citation count in parentheses).*"
+        )
+        lines.append("")
+
+        for fam_name, info in mega.method_families.items():
+            if not isinstance(info, dict):
+                continue
+            desc = str(info.get("description", ""))
+            rep_methods: list[str] = [str(x) for x in (info.get("representative_methods") or [])]
+            cnt = info.get("coverage_count", "—")
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
+
+            fam_lower = fam_name.lower()
+            rep_lower = {r.lower() for r in rep_methods[:5]}
+
+            # Papers that use this method family (match against arch.covered_methods)
+            papers_using: list[str] = []
+            for sp, _, arch in arch_triples:
+                if arch.analysis_failed:
+                    continue
+                covered_str = " ".join(arch.covered_methods).lower()
+                if fam_lower in covered_str or any(r in covered_str for r in rep_lower):
+                    a = _paper_anchor(sp)
+                    p = sp.paper
+                    year_str = str(p.year) if p.year else "n.d."
+                    cit_str = f"{p.citation_count:,} citations" if p.citation_count else "no citation data"
+                    label = f"{_short_title(p.title)} ({year_str}, {cit_str})"
+                    papers_using.append(f"[{label}](#{a})")
+
+            # Render as a compact definition-style block
+            lines.append(f"**{fam_name}{warn}** · *{coverage} surveys*  ")
+            if desc:
+                lines.append(f"> {desc}  ")
+            if rep_methods:
+                lines.append(f"Representative techniques: {', '.join(rep_methods[:6])}  ")
+            if papers_using:
+                lines.append("Papers using this approach:")
+                for ref in papers_using[:6]:
+                    lines.append(f"- {ref}")
+            lines.append("")
+
+    # ── 3. Key benchmarks & datasets ────────────────────────────────────
+    if mega.datasets_and_benchmarks:
+        lines += ["#### Key Benchmarks & Datasets", ""]
+        lines.append("| Benchmark / Dataset | Research area | Surveys citing it |")
+        lines.append("|---|---|---|")
+        for ds in mega.datasets_and_benchmarks:
+            name = ds.get("name", "")
+            task = ds.get("task", "—")
+            cnt = ds.get("coverage_count", "—")
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
+            lines.append(f"| **{name}**{warn} | {task} | {coverage} |")
+        lines.append("")
+
+    # ── 4. Open challenges ───────────────────────────────────────────────
+    if mega.challenges:
+        lines += ["#### Open Challenges", ""]
+        lines.append("| Challenge | Severity | Surveys | Description |")
+        lines.append("|---|---|---|---|")
+        for name, info in mega.challenges.items():
+            if not isinstance(info, dict):
+                continue
+            sev = str(info.get("severity", "—"))
+            cnt = info.get("coverage_count", "—")
+            desc = str(info.get("description", "—"))
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            safe_desc = desc.replace("|", "\\|")
+            lines.append(f"| **{name}** | {sev} | {coverage} | {safe_desc} |")
+        lines.append("")
+
+    return lines
+
+
+def _render_part2_survey_navigator(
+    topic: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+    mega: FieldMegaArchitecture,
+    reading_path: "ReadingPath | None" = None,
+) -> list[str]:
+    cmp = mega.cross_survey_comparison
+    lines: list[str] = [
+        "---",
+        "",
+        "## Part 2 — Survey Navigator",
+        "",
+        "### Survey Orientation Map",
+        "",
+    ]
+
+    # Orientation distribution
+    orientations: dict[str, list[str]] = defaultdict(list)
+    for sp, _, arch in arch_triples:
+        if not arch.analysis_failed:
+            orientations[arch.orientation or "unknown"].append(sp.paper.title)
+
+    if orientations:
+        lines.append("| Orientation | Papers |")
+        lines.append("|---|---|")
+        for orient, titles in sorted(orientations.items()):
+            paper_links = []
+            for title in titles:
+                a = _find_paper_anchor(title, arch_triples)
+                paper_links.append(f"[{_short_title(title)}](#{a})" if a else _short_title(title))
+            lines.append(f"| {orient} | {' · '.join(paper_links)} |")
+    lines.append("")
+
+    # Coverage matrix
+    lines += ["---", "", "### Coverage Matrix", ""]
+    lines.append(
+        "A checkmark means the paper has substantial coverage of that area. "
+        "Links go directly to the paper card."
+    )
+    lines.append("")
+
+    # Pick top 6 papers for the matrix columns
+    matrix_triples = [t for t in arch_triples if not t[2].analysis_failed][:6]
+    if matrix_triples:
+        # Column headers with links
+        col_headers = []
+        for sp, _, _ in matrix_triples:
+            a = _paper_anchor(sp)
+            short = _short_title(sp.paper.title)
+            year = sp.paper.year or ""
+            col_headers.append(f"[{short} {year}](#{a})")
+
+        # Rows: method families and key areas
+        areas: list[str] = (
+            list(mega.method_families.keys())[:4]
+            + list(mega.challenges.keys())[:3]
+        )
+        if not areas:
+            areas = ["Pretraining", "Alignment", "Evaluation", "Applications"]
+
+        header_row = "| |" + "|".join(f" {h} " for h in col_headers) + "|"
+        sep_row = "|---|" + "|".join(":---:" for _ in col_headers) + "|"
+        lines.append(header_row)
+        lines.append(sep_row)
+
+        for area in areas:
+            area_lower = area.lower()
+            cells = []
+            for _, _, arch in matrix_triples:
+                all_covered = (
+                    arch.covered_methods
+                    + arch.covered_tasks
+                    + arch.covered_challenges
+                    + arch.covered_applications
+                )
+                hit = any(area_lower in item.lower() for item in all_covered)
+                cells.append(" ✓ " if hit else "   ")
+            lines.append(f"| {area} |" + "|".join(cells) + "|")
+    lines.append("")
+
+    # Complementary coverage from comparison
+    if cmp and not cmp.comparison_failed and cmp.complementary_coverage:
+        lines += ["---", "", "### Reading Guide: Where to Start", ""]
+        lines.append("| Goal | Best paper |")
+        lines.append("|---|---|")
+        for item in cmp.complementary_coverage[:8]:
+            aspect = item.get("aspect", "")
+            best = item.get("best_covered_by", "")
+            a = _find_paper_anchor(best, arch_triples)
+            link = f"[{best}](#{a})" if a else best
+            lines.append(f"| {aspect} | {link} |")
+        if cmp.best_overall_structure:
+            a = _find_paper_anchor(cmp.best_overall_structure, arch_triples)
+            link = (
+                f"[{cmp.best_overall_structure}](#{a})"
+                if a else cmp.best_overall_structure
+            )
+            lines.append(f"| Best overall structure | {link} |")
+        lines.append("")
+
+    # Reading path (LLM-generated sequenced reading plan)
+    if reading_path and not reading_path.generation_failed and reading_path.steps:
+        lines += ["---", "", "### Sequenced Reading Path", ""]
+        if reading_path.target_audience:
+            lines.append(f"*For: {reading_path.target_audience}*")
+            lines.append("")
+        lines.append("| Step | Paper | Why | Focus | Est. time |")
+        lines.append("|---|---|---|---|---|")
+        for step in reading_path.steps:
+            a = _find_paper_anchor(step.paper_title, arch_triples)
+            title_link = (
+                f"[{_short_title(step.paper_title)}](#{a})" if a
+                else _short_title(step.paper_title)
+            )
+            focus = ", ".join(step.focus_sections[:3]) if step.focus_sections else "—"
+            time_str = step.estimated_reading_time or "—"
+            rationale = step.rationale.replace("|", "\\|")
+            lines.append(f"| {step.step} | {title_link} | {rationale} | {focus} | {time_str} |")
+        lines.append("")
+
+    return lines
+
+
+def _render_part4_paper_cards(
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+    judge_map: "dict[str, JudgeResult] | None" = None,
+) -> list[str]:
+    lines: list[str] = [
+        "---",
+        "",
+        "## Part 4 — Paper Cards",
+        "",
+    ]
+
+    for sp, summary, arch in arch_triples:
+        p = sp.paper
+        anchor = _paper_anchor(sp)
+        jr = (judge_map or {}).get(p.title)
+
+        lines += ["---", ""]
+        lines.append(f'<a id="{anchor}"></a>')
+        lines.append("")
+
+        # Title line with metadata badges
+        lines.append(f"### {p.title}")
+        meta_parts = []
+        if p.year:
+            meta_parts.append(str(p.year))
+        if p.venue:
+            meta_parts.append(p.venue)
+        meta_parts.append(f"Quality {sp.quality_score:.0f} / 100")
+        if p.authority_tier:
+            tier_badge = {"foundational": "🏛", "current_standard": "📌", "emerging": "🌱"}.get(
+                p.authority_tier, ""
+            )
+            meta_parts.append(f"{tier_badge} {p.authority_tier}")
+        if arch.orientation and not arch.analysis_failed:
+            meta_parts.append(f"*{arch.orientation}-oriented*")
+        lines.append(f"**{'  ·  '.join(meta_parts)}**")
+        lines.append("")
+
+        # URL and back-link
+        url = p.url or (f"https://arxiv.org/abs/{p.arxiv_id}" if p.arxiv_id else "")
+        if url:
+            lines.append(f"[Paper URL]({url})  ·  [Back to Coverage Matrix](#coverage-matrix)")
+        else:
+            lines.append("[Back to Coverage Matrix](#coverage-matrix)")
+        lines.append("")
+
+        # One-line takeaway from summary
+        if summary and not summary.summarization_failed and summary.core_problem:
+            lines.append(f"> **One-line takeaway:** {summary.core_problem}")
+            lines.append("")
+
+        # Stats table
+        lines.append("| Field | Value |")
+        lines.append("|---|---|")
+        if arch.orientation and not arch.analysis_failed:
+            lines.append(f"| Orientation | {arch.orientation} |")
+        lines.append(f"| Citations | {p.citation_count} (influential: {p.influential_citation_count}) |")
+        if p.canonical_score > 0:
+            lines.append(f"| Canonical score | {p.canonical_score:.3f} |")
+        if jr and not jr.judge_failed:
+            if jr.recommended_action:
+                lines.append(f"| Recommended action | **{jr.recommended_action}** |")
+            if jr.authority_assessment:
+                lines.append(f"| LLM authority | {jr.authority_assessment} |")
+            if jr.scope_clarity:
+                lines.append(f"| Scope | {jr.scope_clarity} |")
+            if jr.coverage_depth:
+                lines.append(f"| Coverage depth | {jr.coverage_depth} |")
+            if jr.confidence:
+                lines.append(f"| Judge confidence | {jr.confidence:.2f} |")
+        if summary and not summary.summarization_failed and summary.taxonomy:
+            lines.append(f"| Covers | {' · '.join(summary.taxonomy[:5])} |")
+        lines.append("")
+
+        # Taxonomy tree (text-art)
+        if arch.top_level_taxonomy:
+            lines.append("**How this survey organises the field:**")
+            lines.append("")
+            lines.append("```")
+            lines.append(p.title[:50])
+            for i, cat in enumerate(arch.top_level_taxonomy[:6]):
+                connector = "└──" if i == len(arch.top_level_taxonomy[:6]) - 1 else "├──"
+                lines.append(f"{connector} {cat}")
+                subs = arch.second_level_taxonomy.get(cat, [])
+                for j, sub in enumerate(subs[:4]):
+                    sub_conn = "    └──" if j == len(subs[:4]) - 1 else "    ├──"
+                    lines.append(f"{sub_conn} {sub}")
+            lines.append("```")
+            lines.append("")
+
+        # Organizational logic
+        if arch.organizational_logic:
+            lines.append("**How it organises the field:**")
+            lines.append(arch.organizational_logic)
+            lines.append("")
+
+        # Structural strengths and weaknesses (from architecture analysis)
+        if arch.structural_strengths and not arch.analysis_failed:
+            lines.append(
+                f"**Read this if:** {arch.structural_strengths[0]}"
+            )
+        if arch.notable_omissions and not arch.analysis_failed:
+            lines.append(
+                f"**Notable omissions:** {', '.join(arch.notable_omissions[:3])}"
+            )
+
+        # LLM-Judge strengths and weaknesses
+        if jr and not jr.judge_failed:
+            if jr.strengths:
+                lines.append(f"**Strengths:** {' · '.join(jr.strengths[:3])}")
+            if jr.weaknesses:
+                lines.append(f"**Weaknesses:** {' · '.join(jr.weaknesses[:2])}")
+        lines.append("")
+
+    return lines
+
+
+def _render_part0_field_guide(topic: str, guide: "FieldGuide") -> list[str]:
+    """Render Part 0 — Beginner Field Guide."""
+    from .field_guide import render_field_guide_markdown
+    lines: list[str] = [
+        f"# {topic.title()} — Survey Report",
+        "",
+        "---",
+        "",
+        "## Part 0 — Field Guide *(Start Here)*",
+        "",
+        "> This section is a plain-English introduction for newcomers to the field.",
+        "",
+        render_field_guide_markdown(guide),
+        "---",
+        "",
+    ]
+    return lines
+
+
+def _render_part3_concept_graph(graph: "ConceptGraph") -> list[str]:
+    """Render Part 3 — Concept Graph as a node/edge listing."""
+    lines: list[str] = [
+        "---",
+        "",
+        "## Part 3 — Concept Graph",
+        "",
+        f"*{len(graph.nodes)} concepts · {len(graph.edges)} typed relationships*",
+        "",
+    ]
+
+    # Nodes table
+    if graph.nodes:
+        lines += ["### Concepts", ""]
+        lines.append("| ID | Name | Definition |")
+        lines.append("|---|---|---|")
+        for node in graph.nodes:
+            safe_def = node.definition.replace("|", "\\|")
+            lines.append(f"| `{node.node_id}` | **{node.name}** | {safe_def} |")
+        lines.append("")
+
+    # Edges grouped by type
+    if graph.edges:
+        lines += ["### Relationships", ""]
+        from collections import defaultdict as _dd
+        by_type: dict[str, list] = _dd(list)
+        node_name_map = {n.node_id: n.name for n in graph.nodes}
+        for edge in graph.edges:
+            by_type[edge.edge_type].append(edge)
+
+        for etype, edges in sorted(by_type.items()):
+            lines.append(f"**{etype.replace('_', ' ').title()}**")
+            lines.append("")
+            lines.append("| Source | Target | Evidence |")
+            lines.append("|---|---|---|")
+            for e in edges:
+                src_name = node_name_map.get(e.source_id, e.source_id)
+                tgt_name = node_name_map.get(e.target_id, e.target_id)
+                evidence = e.evidence.replace("|", "\\|")
+                lines.append(f"| {src_name} | {tgt_name} | {evidence} |")
+            lines.append("")
+
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive HTML mind map (markmap)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Self-contained HTML template.  markmap-autoloader from CDN does all the
+# rendering — no build step, no local install.
+# Only {topic} and {markdown} are format slots; all other braces are doubled.
+_MINDMAP_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{topic} — Mind Map</title>
+  <style>
+    html, body {{
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #f0f4f8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .mm-header {{
+      position: fixed; top: 14px; left: 50%;
+      transform: translateX(-50%);
+      background: white;
+      border-radius: 24px;
+      padding: 7px 20px;
+      box-shadow: 0 2px 14px rgba(0,0,0,0.12);
+      display: flex; align-items: center; gap: 10px;
+      z-index: 100;
+    }}
+    .mm-header h1 {{
+      font-size: 0.88rem; font-weight: 700;
+      color: #1a202c; white-space: nowrap; margin: 0;
+    }}
+    .mm-header .sep {{ color: #cbd5e0; }}
+    .mm-header button {{
+      font-size: 0.72rem; padding: 3px 11px;
+      border: 1px solid #e2e8f0; border-radius: 10px;
+      background: white; color: #4a5568; cursor: pointer;
+      transition: all 0.15s;
+    }}
+    .mm-header button:hover {{ background: #ebf4ff; border-color: #90cdf4; color: #2b6cb0; }}
+    .markmap {{ width: 100vw; height: 100vh; }}
+    svg.markmap {{ width: 100%; height: 100%; }}
+    /* Make paper-link nodes visually distinct */
+    .markmap-node text a {{ text-decoration: underline; }}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader@0.16"></script>
+</head>
+<body>
+  <div class="mm-header">
+    <h1>{topic}</h1>
+    <span class="sep">|</span>
+    <button id="btn-fit">⤢ Fit</button>
+    <button id="btn-expand">＋ Expand all</button>
+    <button id="btn-collapse">－ Collapse all</button>
+  </div>
+
+  <div class="markmap">
+    <script type="text/template">
+---
+markmap:
+  colorFreezeLevel: 2
+  initialExpandLevel: 2
+  maxWidth: 360
+  zoom: true
+  pan: true
+---
+{markdown}
+    </script>
+  </div>
+
+  <script>
+    // Poll for the markmap SVG instance (autoloader is async)
+    let mm = null;
+    const poll = setInterval(() => {{
+      const svg = document.querySelector("svg.markmap");
+      if (svg && svg.__markmap) {{ mm = svg.__markmap; clearInterval(poll); }}
+    }}, 80);
+
+    document.getElementById("btn-fit").onclick = () => mm && mm.fit();
+
+    function walkNodes(node, fn) {{
+      fn(node);
+      (node.children || []).forEach(c => walkNodes(c, fn));
+    }}
+    document.getElementById("btn-expand").onclick = () => {{
+      if (!mm) return;
+      walkNodes(mm.state.data, n => {{ n.payload = n.payload || {{}}; n.payload.fold = 0; }});
+      mm.renderData(mm.state.data);
+      mm.fit();
+    }};
+    document.getElementById("btn-collapse").onclick = () => {{
+      if (!mm) return;
+      // Collapse all but the root's direct children
+      (mm.state.data.children || []).forEach(child => {{
+        walkNodes(child, (n, depth) => {{
+          if (n !== child) {{ n.payload = n.payload || {{}}; n.payload.fold = 1; }}
+        }});
+      }});
+      mm.renderData(mm.state.data);
+      mm.fit();
+    }};
+
+    // Open all links in a new tab
+    document.addEventListener("click", e => {{
+      const a = e.target.closest("a[href]");
+      if (a && !a.href.startsWith("#")) {{
+        e.preventDefault();
+        window.open(a.href, "_blank", "noopener");
+      }}
+    }});
+  </script>
+</body>
+</html>
+"""
+
+
+def _build_mindmap_markdown(
+    topic: str,
+    mega: FieldMegaArchitecture,
+    arch_triples: "list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]]",
+) -> str:
+    """
+    Build rich Markdown for markmap from the structured FieldMegaArchitecture.
+
+    Node anatomy:
+      - **Concept name** `N/M surveys`          ← bold label + coverage badge
+        - *One-sentence definition*             ← italic description child
+        - Techniques: `GPT-4` `BERT` `LLaMA`   ← code-span technique badges
+        - [Paper title (year)](url) `120✱`      ← clickable citation children
+
+    Nodes with coverage below 30% get a ⚠️ suffix.
+    Paper links open in a new tab (handled by the HTML script).
+    """
+    n = len(mega.source_papers)
+    low = max(1, round(n * 0.3))
+
+    def cov(cnt) -> str:
+        return f"`{cnt}/{n}`" if isinstance(cnt, int) else f"`{cnt}`"
+
+    def warn(cnt) -> str:
+        return " ⚠️" if isinstance(cnt, int) and cnt < low else ""
+
+    def paper_link(sp: ScoredPaper) -> str:
+        """One-line citation: linked title + year + citation badge."""
+        p = sp.paper
+        url = p.url or (f"https://arxiv.org/abs/{p.arxiv_id}" if p.arxiv_id else "")
+        year = str(p.year) if p.year else "n.d."
+        cit = f" `{p.citation_count:,}✱`" if p.citation_count else ""
+        label = f"**{_short_title(p.title, 7)}** ({year})"
+        return f"[{label}]({url}){cit}" if url else f"{label}{cit}"
+
+    lines: list[str] = [f"# {topic}", ""]
+
+    # ── Core Problems ────────────────────────────────────────────────────
+    if mega.core_problems:
+        lines += ["## ❓ Core Problems", ""]
+        for cp in mega.core_problems:
+            prob = str(cp.get("problem", "")).strip()
+            cnt  = cp.get("coverage_count", "—")
+            best = str(cp.get("best_paper", "")).strip()
+            if not prob:
+                continue
+            lines.append(f"- **{_truncate_str(prob, 55)}** {cov(cnt)}")
+            if best:
+                a = _find_paper_anchor(best, arch_triples)
+                lines.append(f"  - Best covered by: [{best}](#{a})" if a else f"  - Best covered by: {best}")
+        lines.append("")
+
+    # ── Research Areas (major tasks) ─────────────────────────────────────
+    if mega.major_tasks:
+        lines += ["## 📋 Research Areas", ""]
+        for task, info in mega.major_tasks.items():
+            if not isinstance(info, dict):
+                continue
+            cnt  = info.get("coverage_count", "—")
+            desc = str(info.get("description", "")).strip()
+            lines.append(f"- **{task}**{warn(cnt)} {cov(cnt)}")
+            if desc:
+                lines.append(f"  - *{desc}*")
+            # Papers covering this task
+            t_lower = task.lower()
+            for sp, _, arch in arch_triples:
+                if arch.analysis_failed:
+                    continue
+                if any(t_lower in t.lower() or t.lower() in t_lower
+                       for t in arch.covered_tasks):
+                    lines.append(f"  - {paper_link(sp)}")
+        lines.append("")
+
+    # ── Methods ──────────────────────────────────────────────────────────
+    if mega.method_families:
+        lines += ["## 🔧 Methods", ""]
+        for fam, info in mega.method_families.items():
+            if not isinstance(info, dict):
+                continue
+            cnt  = info.get("coverage_count", "—")
+            desc = str(info.get("description", "")).strip()
+            reps: list[str] = [str(x) for x in (info.get("representative_methods") or [])]
+            lines.append(f"- **{fam}**{warn(cnt)} {cov(cnt)}")
+            if desc:
+                lines.append(f"  - *{desc}*")
+            if reps:
+                badges = " ".join(f"`{r}`" for r in reps[:6])
+                lines.append(f"  - Techniques: {badges}")
+            # Papers using this method
+            f_lower = fam.lower()
+            rep_lower = {r.lower() for r in reps[:5]}
+            for sp, _, arch in arch_triples:
+                if arch.analysis_failed:
+                    continue
+                covered = " ".join(arch.covered_methods).lower()
+                if f_lower in covered or any(r in covered for r in rep_lower):
+                    lines.append(f"  - {paper_link(sp)}")
+        lines.append("")
+
+    # ── Benchmarks & Datasets ────────────────────────────────────────────
+    if mega.datasets_and_benchmarks:
+        lines += ["## 📊 Benchmarks", ""]
+        for ds in mega.datasets_and_benchmarks:
+            name = str(ds.get("name", "")).strip()
+            task = str(ds.get("task", "")).strip()
+            cnt  = ds.get("coverage_count", "—")
+            if not name:
+                continue
+            lines.append(f"- **{name}**{warn(cnt)} {cov(cnt)}")
+            if task:
+                lines.append(f"  - *{task}*")
+        lines.append("")
+
+    # ── Challenges ────────────────────────────────────────────────────────
+    if mega.challenges:
+        lines += ["## ⚡ Challenges", ""]
+        for name, info in mega.challenges.items():
+            if not isinstance(info, dict):
+                continue
+            cnt  = info.get("coverage_count", "—")
+            sev  = str(info.get("severity", "")).strip()
+            desc = str(info.get("description", "")).strip()
+            sev_badge = f" `{sev}`" if sev else ""
+            lines.append(f"- **{name}**{sev_badge} {cov(cnt)}")
+            if desc:
+                lines.append(f"  - *{desc}*")
+        lines.append("")
+
+    # ── Research Gaps ─────────────────────────────────────────────────────
+    if mega.open_gaps:
+        lines += ["## 🔭 Research Gaps", ""]
+        for gap in mega.open_gaps:
+            score = f" `score {gap.opportunity_score:.2f}`" if gap.opportunity_score else ""
+            gtype = f" `{gap.gap_type}`" if gap.gap_type else ""
+            lines.append(f"- **{_truncate_str(gap.gap, 60)}**{gtype}{score}")
+            for ev_title in gap.evidence[:2]:
+                a = _find_paper_anchor(ev_title, arch_triples)
+                ev_link = f"[{_short_title(ev_title)}](#{a})" if a else _short_title(ev_title)
+                lines.append(f"  - Evidence: {ev_link}")
+        lines.append("")
+
+    # ── Applications ─────────────────────────────────────────────────────
+    if mega.applications:
+        lines += ["## 🌐 Applications", ""]
+        for app in mega.applications:
+            lines.append(f"- {app}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _truncate_str(text: str, max_len: int) -> str:
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def _render_mermaid_png(mmd_path: Path, png_path: Path) -> None:
+    """
+    Render a .mmd file to PNG using the Mermaid CLI.
+
+    Tries `mmdc` first (global install), then `npx @mermaid-js/mermaid-cli`
+    (no global install required).  Logs a one-line hint and returns silently
+    if neither is available — the pipeline is never blocked by this.
+    """
+    # Candidate mmdc locations: PATH first, then common nvm/homebrew locations
+    _MMDC_CANDIDATES = [
+        "mmdc",
+        "/Users/guanzhongpan/.nvm/versions/node/v20.18.0/bin/mmdc",
+        "/opt/homebrew/bin/mmdc",
+    ]
+    cmd: list[str] | None = None
+    for candidate in _MMDC_CANDIDATES:
+        if shutil.which(candidate) or (
+            candidate != "mmdc" and __import__("os").path.exists(candidate)
+        ):
+            cmd = [candidate, "-i", str(mmd_path), "-o", str(png_path), "-b", "white"]
+            break
+    if cmd is None and shutil.which("npx"):
+        cmd = [
+            "npx", "--yes", "@mermaid-js/mermaid-cli",
+            "-i", str(mmd_path), "-o", str(png_path), "-b", "white",
+        ]
+
+    if cmd is None:
+        logger.info(
+            "Mermaid CLI not found — skipping PNG render for %s. "
+            "Install with: npm install -g @mermaid-js/mermaid-cli",
+            mmd_path.name,
+        )
+        return
+
+    # Tell Puppeteer to use system Chrome if present (avoids download errors)
+    env = {**__import__("os").environ}
+    system_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if __import__("os").path.exists(system_chrome):
+        env["PUPPETEER_EXECUTABLE_PATH"] = system_chrome
+        env["PUPPETEER_SKIP_DOWNLOAD"] = "true"
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        if result.returncode == 0:
+            logger.info("Mermaid PNG rendered: %s", png_path.name)
+        else:
+            logger.warning(
+                "Mermaid render failed for %s (exit %d): %s",
+                mmd_path.name, result.returncode,
+                (result.stderr or result.stdout).strip()[:200],
+            )
+    except subprocess.TimeoutExpired:
+        logger.warning("Mermaid render timed out for %s", mmd_path.name)
+    except Exception as exc:
+        logger.warning("Mermaid render error for %s: %s", mmd_path.name, exc)
+
+
+def _find_paper_anchor(
+    title_fragment: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+) -> str:
+    """
+    Find a paper anchor by matching title_fragment against known paper titles.
+    Returns the anchor string or "" if no match found.
+    """
+    if not title_fragment:
+        return ""
+    frag_lower = title_fragment.lower()
+    # Try contains match first
+    for sp, _, _ in arch_triples:
+        if frag_lower in sp.paper.title.lower() or sp.paper.title.lower() in frag_lower:
+            return _paper_anchor(sp)
+    # Fallback: word overlap
+    frag_words = set(frag_lower.split())
+    best_overlap = 0
+    best_anchor = ""
+    for sp, _, _ in arch_triples:
+        title_words = set(sp.paper.title.lower().split())
+        overlap = len(frag_words & title_words)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_anchor = _paper_anchor(sp)
+    return best_anchor if best_overlap >= 2 else ""
+
+
+def _short_title(title: str, max_words: int = 5) -> str:
+    words = title.split()
+    if len(words) <= max_words:
+        return title
+    return " ".join(words[:max_words]) + "…"

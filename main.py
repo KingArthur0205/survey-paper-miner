@@ -1,0 +1,800 @@
+"""
+AI Survey Paper Miner — main entry point.
+
+Three operating modes:
+
+  run     (default) — full pipeline end-to-end
+  fetch             — steps 1–6b: retrieve, filter, deduplicate, score, stratify,
+                      then save to DB + papers_scored.jsonl
+  analyze           — steps 7+: load scored papers from papers_scored.jsonl,
+                      then summarise, judge, architecture, concept-graph,
+                      reading-path, field-guide, export
+
+Usage:
+    python main.py [run] --config config/topics.yaml
+    python main.py fetch  --config config/topics.yaml
+    python main.py analyze --config config/topics.yaml --papers-file data/processed/papers_scored.jsonl
+
+Pipeline steps:
+    1.  Load config
+    2.  Build queries (LLM or cross-product)
+    3.  Retrieve papers (arXiv + OpenAlex + CORE in parallel)
+    4.  Topic relevance filter + survey-signal filter
+    5.  Deduplicate
+    5b. LLM relevance filter
+    5c. Canonical Survey Detector  (writes paper.canonical_score)
+    6.  Score and rank
+    6b. Temporal Stratifier        (writes paper.authority_tier)
+    --- fetch mode ends here; saves papers_scored.jsonl ---
+    7.  LLM summarisation (top-N)
+    7b. PDF full-text parser       (enriches arch prompt)
+    8.  Architecture analysis + Mega-Architecture synthesis
+    8b. LLM-as-Judge               (authority assessment)
+    9.  Concept graph extraction   (per topic)
+    9b. Reading path generation    (per topic)
+    9c. Field guide generation     (per topic)
+    10. Persist to SQLite
+    11. Export XLSX / CSV / JSONL / Markdown / Architecture reports
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env before any module that reads environment variables
+load_dotenv()
+
+from src.config import load_config, AppConfig
+from src.query_builder import build_queries, SearchQuery
+from src.retrievers import ArxivRetriever, OpenAlexRetriever, CoreRetriever
+from src.filter import filter_all_topics, filter_survey_signal, filter_min_score
+from src.llm_filter import llm_filter_papers
+from src.cache import QueryCache
+from src.dedup import deduplicate
+from src.canonical import detect_canonical_surveys
+from src.scorer import score_papers
+from src.stratifier import stratify_papers
+from src.summarizer import LLMSummarizer
+from src.judge import LLMJudge
+from src.architecture_analyzer import ArchitectureAnalyzer
+from src.mega_architect import MegaArchitectSynthesizer
+from src.database import Database
+from src.export import Exporter, make_run_dir
+from src.models import JudgeResult, Paper, ScoredPaper
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="AI Survey Paper Miner — find and rank high-quality AI survey papers."
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["run", "fetch", "analyze"],
+        default="run",
+        help=(
+            "Pipeline mode: 'run' (default) = full pipeline; "
+            "'fetch' = retrieve+score only; "
+            "'analyze' = summarise+judge+arch+extras from saved papers_scored.jsonl"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default="config/topics.yaml",
+        help="Path to topics.yaml (default: config/topics.yaml)",
+    )
+    parser.add_argument(
+        "--venues-config",
+        default=None,
+        help="Path to venues.yaml (default: config/venues.yaml alongside topics.yaml)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory for CSV/JSONL/Markdown (overrides config)",
+    )
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=None,
+        help="Max papers fetched per query per source (overrides config)",
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=None,
+        help="Number of top papers to summarise with LLM (overrides config)",
+    )
+    parser.add_argument(
+        "--year-from",
+        type=int,
+        default=None,
+        help="Earliest publication year (overrides config)",
+    )
+    parser.add_argument(
+        "--year-to",
+        type=int,
+        default=None,
+        help="Latest publication year (overrides config)",
+    )
+    parser.add_argument(
+        "--papers-file",
+        default="data/processed/papers_scored.jsonl",
+        help=(
+            "Path to papers_scored.jsonl used by 'analyze' mode "
+            "(default: data/processed/papers_scored.jsonl)"
+        ),
+    )
+    parser.add_argument(
+        "--no-llm-queries",
+        action="store_true",
+        help="Use mechanical topic×term cross-product instead of LLM-generated queries",
+    )
+    parser.add_argument(
+        "--no-llm-filter",
+        action="store_true",
+        help="Skip LLM relevance filter (faster, but may include off-topic papers)",
+    )
+    parser.add_argument(
+        "--no-summarize",
+        action="store_true",
+        help="Skip LLM summarisation (faster, no API cost)",
+    )
+    parser.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="Skip LLM-as-Judge authority assessment pass",
+    )
+    parser.add_argument(
+        "--no-architecture",
+        action="store_true",
+        help="Skip architecture analysis and mega-architecture synthesis",
+    )
+    parser.add_argument(
+        "--no-pdf-parse",
+        action="store_true",
+        help="Skip PDF full-text parsing (no pdfplumber required)",
+    )
+    parser.add_argument(
+        "--no-concept-graph",
+        action="store_true",
+        help="Skip typed concept graph extraction",
+    )
+    parser.add_argument(
+        "--no-reading-path",
+        action="store_true",
+        help="Skip reading path generation",
+    )
+    parser.add_argument(
+        "--arxiv",
+        action="store_true",
+        help=(
+            "Enable the arXiv retriever (disabled by default). "
+            "OpenAlex already indexes all arXiv papers with richer metadata, "
+            "so enabling arXiv adds minimal coverage at the cost of rate-limit "
+            "errors (429s). Only useful if you need papers within the 1-2 day "
+            "window before OpenAlex picks them up."
+        ),
+    )
+    parser.add_argument(
+        "--db",
+        default="data/processed/papers.db",
+        help="SQLite database path (default: data/processed/papers.db)",
+    )
+    return parser.parse_args()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode dispatchers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    """Full pipeline (fetch + analyze) — backward-compatible default."""
+    cfg = _load_cfg(args)
+    scored_papers = _run_fetch_steps(args, cfg)
+    _run_analyze_steps(args, cfg, scored_papers)
+
+
+def run_fetch(args: argparse.Namespace) -> None:
+    """
+    Fetch-only mode: retrieve → filter → deduplicate → score → stratify.
+    Saves results to papers_scored.jsonl for later use by 'analyze' mode.
+    """
+    cfg = _load_cfg(args)
+    scored_papers = _run_fetch_steps(args, cfg)
+
+    # Save to DB
+    db = Database(args.db)
+    db.init_schema()
+    db.upsert_papers(scored_papers)
+    db.close()
+
+    # Save to JSONL for 'analyze' mode
+    papers_file = Path(args.papers_file)
+    papers_file.parent.mkdir(parents=True, exist_ok=True)
+    with papers_file.open("w", encoding="utf-8") as f:
+        for sp in scored_papers:
+            f.write(json.dumps(sp.model_dump(), ensure_ascii=False) + "\n")
+
+    print("\n" + "─" * 60)
+    print("✓ Fetch complete")
+    print(f"  Papers ranked:  {len(scored_papers)}")
+    print(f"\nSaved to: {papers_file}")
+    print(f"  Run analysis with: python main.py analyze --papers-file {papers_file}")
+    print("─" * 60 + "\n")
+
+
+def run_analyze(args: argparse.Namespace) -> None:
+    """
+    Analyze-only mode: load scored papers from JSONL, then run all LLM passes.
+    """
+    papers_file = Path(args.papers_file)
+    if not papers_file.exists():
+        logger.error(
+            "papers_scored.jsonl not found at '%s'. "
+            "Run 'python main.py fetch' first, or specify --papers-file.",
+            papers_file,
+        )
+        sys.exit(1)
+
+    cfg = _load_cfg(args)
+
+    logger.info("Loading scored papers from %s …", papers_file)
+    scored_papers: list[ScoredPaper] = []
+    with papers_file.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    scored_papers.append(ScoredPaper.model_validate(json.loads(line)))
+                except Exception as exc:
+                    logger.warning("Skipping malformed line in papers_scored.jsonl: %s", exc)
+
+    logger.info("Loaded %d scored papers from %s", len(scored_papers), papers_file)
+    _run_analyze_steps(args, cfg, scored_papers)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared step functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_cfg(args: argparse.Namespace) -> AppConfig:
+    overrides: dict = {}
+    if args.output_dir:
+        overrides["output_dir"] = Path(args.output_dir)
+    if args.max_results:
+        overrides["max_results_per_query"] = args.max_results
+    if args.top_n:
+        overrides["top_n_to_summarize"] = args.top_n
+    if args.year_from:
+        overrides["year_from"] = args.year_from
+    if args.year_to:
+        overrides["year_to"] = args.year_to
+
+    cfg = load_config(args.config, venues_path=args.venues_config, overrides=overrides)
+    logger.info(
+        "Config loaded: %d topics, %d–%d, top-%d to summarise",
+        len(cfg.topics), cfg.year_from, cfg.year_to, cfg.top_n_to_summarize,
+    )
+    return cfg
+
+
+def _run_fetch_steps(
+    args: argparse.Namespace,
+    cfg: AppConfig,
+) -> list[ScoredPaper]:
+    """Steps 1–6b: retrieve, filter, dedup, score, stratify."""
+
+    # ------------------------------------------------------------------ #
+    # Volume sanity check                                                  #
+    # ------------------------------------------------------------------ #
+    _warn_low_volume(cfg)
+
+    # ------------------------------------------------------------------ #
+    # 2. Build queries                                                     #
+    # ------------------------------------------------------------------ #
+    use_llm_queries = not args.no_llm_queries
+    queries = build_queries(cfg, use_llm=use_llm_queries)
+    logger.info(
+        "Generated %d queries via %s",
+        len(queries),
+        "LLM" if (use_llm_queries and cfg.anthropic_api_key) else "cross-product",
+    )
+
+    # ------------------------------------------------------------------ #
+    # 3. Retrieve papers from all sources                                  #
+    # ------------------------------------------------------------------ #
+    cache = QueryCache(path="data/raw/query_cache.json", ttl_days=7)
+
+    # arXiv is disabled by default: OpenAlex already indexes all arXiv papers
+    # with richer metadata (citation counts, DOIs), so arXiv adds minimal
+    # coverage. Pass --arxiv to opt-in if you specifically need it.
+    retrievers = [OpenAlexRetriever()]
+    if getattr(args, "arxiv", False):
+        retrievers.insert(0, ArxivRetriever())
+        logger.info(
+            "arXiv retriever enabled (--arxiv flag). "
+            "Note: arXiv rate-limits aggressive clients; 429s are expected."
+        )
+    else:
+        logger.info(
+            "arXiv retriever disabled (default). "
+            "Pass --arxiv to enable it. OpenAlex covers all arXiv papers."
+        )
+
+    if cfg.core_api_key:
+        retrievers.append(CoreRetriever(api_key=cfg.core_api_key))
+    else:
+        logger.info(
+            "CORE retriever disabled — no CORE_API_KEY set. "
+            "Add CORE_API_KEY to .env to enable it (free at core.ac.uk/services/api)."
+        )
+    for r in retrievers:
+        r._cache = cache
+
+    all_papers: list[Paper] = _retrieve_all(queries, retrievers, cfg)
+    cache.save()
+
+    logger.info(
+        "Cache stats: %d hits, %d misses, %d total entries",
+        cache.stats["hits"], cache.stats["misses"], cache.stats["total_entries"],
+    )
+    logger.info("Total papers retrieved (before filtering): %d", len(all_papers))
+
+    # ------------------------------------------------------------------ #
+    # 4. Three-layer relevance filter                                      #
+    # ------------------------------------------------------------------ #
+    all_papers = filter_all_topics(all_papers, min_fraction=0.5)
+    all_papers = filter_survey_signal(all_papers)
+    logger.info("Papers after relevance + survey-signal filter: %d", len(all_papers))
+
+    # ------------------------------------------------------------------ #
+    # 5. Deduplicate                                                        #
+    # ------------------------------------------------------------------ #
+    unique_papers = deduplicate(all_papers)
+    logger.info("Unique papers after dedup: %d", len(unique_papers))
+
+    # ------------------------------------------------------------------ #
+    # 5b. LLM relevance filter                                             #
+    # ------------------------------------------------------------------ #
+    if not args.no_llm_filter:
+        unique_papers = llm_filter_papers(unique_papers, cfg)
+        logger.info("Papers after LLM relevance filter: %d", len(unique_papers))
+
+    # ------------------------------------------------------------------ #
+    # 5c. Canonical Survey Detector                                        #
+    # ------------------------------------------------------------------ #
+    if cfg.canonical_detector_enabled:
+        unique_papers = detect_canonical_surveys(unique_papers)
+
+    # ------------------------------------------------------------------ #
+    # 6. Score and rank                                                    #
+    # ------------------------------------------------------------------ #
+    scored_papers = score_papers(unique_papers, cfg)
+    scored_papers = filter_min_score(scored_papers, min_score=cfg.min_quality_score)
+
+    logger.info(
+        "Top paper: '%s' (score=%.1f)",
+        scored_papers[0].paper.title[:80] if scored_papers else "—",
+        scored_papers[0].quality_score if scored_papers else 0,
+    )
+
+    # ------------------------------------------------------------------ #
+    # 6b. Temporal Stratifier                                              #
+    # ------------------------------------------------------------------ #
+    scored_papers = stratify_papers(scored_papers)
+
+    return scored_papers
+
+
+def _run_analyze_steps(
+    args: argparse.Namespace,
+    cfg: AppConfig,
+    scored_papers: list[ScoredPaper],
+) -> None:
+    """Steps 7–11: LLM passes, architecture, extras, export."""
+
+    # ------------------------------------------------------------------ #
+    # 7. Summarise top-N with LLM                                         #
+    # ------------------------------------------------------------------ #
+    summary_pairs = []
+    if not args.no_summarize:
+        if not cfg.anthropic_api_key:
+            logger.warning(
+                "ANTHROPIC_API_KEY not set — skipping LLM summarisation. "
+                "Set it in .env or pass --no-summarize to suppress this warning."
+            )
+        else:
+            logger.info(
+                "Summarising top %d papers with %s …",
+                cfg.top_n_to_summarize, "claude-sonnet-4-6",
+            )
+            summarizer = LLMSummarizer(cfg)
+            summary_pairs = summarizer.summarize_top_n(scored_papers, cfg.top_n_to_summarize)
+            failed = sum(1 for _, s in summary_pairs if s.summarization_failed)
+            logger.info(
+                "Summarisation complete: %d succeeded, %d failed",
+                len(summary_pairs) - failed, failed,
+            )
+
+    # ------------------------------------------------------------------ #
+    # 7b. PDF full-text parser                                             #
+    # ------------------------------------------------------------------ #
+    parsed_map: dict = {}
+    run_pdf_parse = (
+        not args.no_pdf_parse
+        and bool(summary_pairs)
+    )
+    if run_pdf_parse:
+        try:
+            from src.pdf_parser import parse_papers
+            cache_dir = Path("data/raw/parsed_pdfs")
+            papers_to_parse = [sp for sp, _ in summary_pairs]
+            logger.info("Parsing PDFs for %d papers …", len(papers_to_parse))
+            parsed_map = parse_papers(papers_to_parse, cache_dir)
+            success = sum(1 for p in parsed_map.values() if not p.parse_failed)
+            logger.info(
+                "PDF parsing complete: %d succeeded, %d failed",
+                success, len(parsed_map) - success,
+            )
+        except ImportError:
+            logger.warning(
+                "pdfplumber not installed — skipping PDF parsing. "
+                "Run: pip install pdfplumber"
+            )
+        except Exception as exc:
+            logger.warning("PDF parsing failed: %s", exc)
+    elif args.no_pdf_parse:
+        logger.info("Skipping PDF parsing (--no-pdf-parse).")
+
+    # ------------------------------------------------------------------ #
+    # 8. Architecture analysis                                             #
+    # ------------------------------------------------------------------ #
+    arch_triples_by_topic: dict[str, tuple] = {}
+
+    run_architecture = (
+        not args.no_architecture
+        and cfg.architecture_enabled
+        and bool(summary_pairs)
+        and bool(cfg.anthropic_api_key)
+    )
+
+    if run_architecture:
+        logger.info(
+            "Running architecture analysis on top %d papers …",
+            cfg.analyze_top_n,
+        )
+        arch_analyzer = ArchitectureAnalyzer(cfg)
+        arch_triples = arch_analyzer.analyze(summary_pairs, parsed_map=parsed_map)
+        comparisons = arch_analyzer.compare_by_topic(arch_triples)
+
+        if cfg.mega_architecture_enabled:
+            synth = MegaArchitectSynthesizer(cfg)
+            by_topic: dict = defaultdict(list)
+            for triple in arch_triples:
+                sp = triple[0]
+                topic_key = sp.paper.topic_queries[0] if sp.paper.topic_queries else "Uncategorised"
+                by_topic[topic_key].append(triple)
+
+            for topic_key, triples in by_topic.items():
+                valid = [t for t in triples if not t[2].analysis_failed]
+                if len(valid) < 2:
+                    continue
+                cmp = comparisons.get(topic_key)
+                mega = synth.synthesize(topic_key, triples, cmp)
+                arch_triples_by_topic[topic_key] = (triples, mega)
+    else:
+        if not summary_pairs:
+            logger.info("Skipping architecture analysis — no summaries available.")
+        elif args.no_architecture:
+            logger.info("Skipping architecture analysis (--no-architecture).")
+
+    # ------------------------------------------------------------------ #
+    # 8b. LLM-as-Judge                                                    #
+    # ------------------------------------------------------------------ #
+    judge_map: dict[str, JudgeResult] = {}
+    run_judge = (
+        not args.no_judge
+        and bool(summary_pairs)
+        and bool(cfg.anthropic_api_key)
+    )
+    if run_judge:
+        logger.info("Running LLM judge on top %d papers …", cfg.judge_top_n)
+        judge = LLMJudge(cfg)
+        judge_triples = judge.judge_papers(summary_pairs)
+        judge_map = {sp.paper.title: jr for sp, _, jr in judge_triples}
+        failed_j = sum(1 for _, _, jr in judge_triples if jr.judge_failed)
+        logger.info(
+            "Judge complete: %d assessed, %d failed",
+            len(judge_triples) - failed_j, failed_j,
+        )
+    elif args.no_judge:
+        logger.info("Skipping LLM judge (--no-judge).")
+    elif not summary_pairs:
+        logger.info("Skipping LLM judge — no summaries available.")
+
+    # ------------------------------------------------------------------ #
+    # 9. Concept graph + reading path + field guide (per topic)           #
+    # ------------------------------------------------------------------ #
+    concept_graphs: dict[str, object] = {}
+    reading_paths: dict[str, object] = {}
+
+    for topic_key, (triples, mega) in arch_triples_by_topic.items():
+        # Build judge_triples for this topic (needed by reading path)
+        topic_judge_triples = []
+        if judge_map:
+            for sp, summary, arch in triples:
+                jr = judge_map.get(sp.paper.title)
+                if jr:
+                    topic_judge_triples.append((sp, summary, jr))
+
+        # 9. Concept graph
+        if not args.no_concept_graph and cfg.anthropic_api_key and not mega.synthesis_failed:
+            try:
+                from src.concept_graph import ConceptGraphExtractor
+                extractor = ConceptGraphExtractor(cfg)
+                cg = extractor.extract(topic_key, mega, triples)
+                concept_graphs[topic_key] = cg
+            except Exception as exc:
+                logger.warning("[concept_graph] Failed for '%s': %s", topic_key, exc)
+
+        # 9b. Reading path
+        if not args.no_reading_path and cfg.anthropic_api_key and topic_judge_triples:
+            try:
+                from src.reading_path import ReadingPathGenerator
+                rp_gen = ReadingPathGenerator(cfg)
+                rp = rp_gen.generate(topic_key, mega, topic_judge_triples, max_papers=10)
+                reading_paths[topic_key] = rp
+            except Exception as exc:
+                logger.warning("[reading_path] Failed for '%s': %s", topic_key, exc)
+
+    # ------------------------------------------------------------------ #
+    # 10. Persist to SQLite                                                #
+    # ------------------------------------------------------------------ #
+    db = Database(args.db)
+    db.init_schema()
+    title_to_id = db.upsert_papers(scored_papers)
+    if summary_pairs:
+        db.upsert_summaries(summary_pairs, title_to_id)
+    db.close()
+
+    # ------------------------------------------------------------------ #
+    # 11. Export                                                           #
+    # ------------------------------------------------------------------ #
+    arch_map = {}
+    for _, (triples, _) in arch_triples_by_topic.items():
+        for sp, _, arch in triples:
+            arch_map[sp.paper.title] = arch
+
+    run_dir = make_run_dir(cfg.topics, cfg.output_dir)
+    exporter = Exporter(run_dir)
+
+    xlsx_path = exporter.export_xlsx(scored_papers, summary_pairs)
+    csv_path = exporter.export_csv(scored_papers, judge_map=judge_map or None, arch_map=arch_map or None)
+    jsonl_path = exporter.export_jsonl(summary_pairs, judge_map=judge_map or None) if summary_pairs else None
+    md_path = exporter.export_markdown(scored_papers, summary_pairs)
+
+    arch_report_paths = []
+    for topic_key, (triples, mega) in arch_triples_by_topic.items():
+        rp = reading_paths.get(topic_key)
+        cg = concept_graphs.get(topic_key)
+
+        rpt = exporter.export_architecture_report(
+            topic_key, triples, mega,
+            judge_map=judge_map or None,
+            reading_path=rp,
+            concept_graph=cg,
+        )
+        arch_report_paths.append(rpt)
+
+        json_path = exporter.export_mega_architecture_json(topic_key, mega)
+        if json_path:
+            arch_report_paths.append(json_path)
+
+        mmd_path = exporter.export_mega_architecture_mmd(topic_key, mega)
+        if mmd_path:
+            arch_report_paths.append(mmd_path)
+            png_path = mmd_path.with_suffix(".png")
+            if png_path.exists():
+                arch_report_paths.append(png_path)
+
+        html_path = exporter.export_mindmap_html(topic_key, mega, arch_triples=triples)
+        if html_path:
+            arch_report_paths.append(html_path)
+
+        if cg:
+            cg_path = exporter.export_concept_graph_json(topic_key, cg)
+            if cg_path:
+                arch_report_paths.append(cg_path)
+
+        if rp:
+            rp_path = exporter.export_reading_path_json(topic_key, rp)
+            if rp_path:
+                arch_report_paths.append(rp_path)
+
+    print("\n" + "─" * 60)
+    print("✓ Pipeline complete")
+    print(f"  Papers ranked:     {len(scored_papers)}")
+    print(f"  Papers summarised: {len(summary_pairs)}")
+    if judge_map:
+        print(f"  Papers judged:     {len(judge_map)}")
+    if arch_triples_by_topic:
+        print(f"  Topics analysed:   {len(arch_triples_by_topic)}")
+    if concept_graphs:
+        print(f"  Concept graphs:    {len(concept_graphs)}")
+    if reading_paths:
+        print(f"  Reading paths:     {len(reading_paths)}")
+    print(f"\nOutputs saved to: {run_dir}")
+    print(f"  XLSX   → {xlsx_path.name}")
+    print(f"  CSV    → {csv_path.name}")
+    if jsonl_path:
+        print(f"  JSONL  → {jsonl_path.name}")
+    print(f"  Report → {md_path.name}")
+    for p in arch_report_paths:
+        print(f"  Arch   → {p.name}")
+    print("─" * 60 + "\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retrieval helpers (shared)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ARXIV_MAX_QUERIES = 5   # arXiv is rate-limited and already covered by OpenAlex
+
+# ── Volume sanity-check ───────────────────────────────────────────────────────
+
+_LLM_QUERIES_PER_TOPIC = 10  # mirrors query_builder._LLM_QUERIES_PER_TOPIC
+
+def _warn_low_volume(cfg: AppConfig) -> None:
+    """
+    Warn when config settings will almost certainly produce too few papers.
+
+    The retrieval funnel is:
+        (topics × queries_per_topic × sources × results_per_query)
+        → dedup (expect ~40–60 % unique)
+        → survey-signal filter (expect ~40–60 % pass)
+        → LLM filter (expect ~70–90 % pass)
+        → scoring
+
+    Rule of thumb: you need at least ~200 raw papers before filtering to
+    reliably end up with 10+ after all filters for a broad topic.
+    """
+    n_sources = 1  # OpenAlex always present; CORE optional
+    if cfg.core_api_key:
+        n_sources += 1
+
+    raw_upper_bound = (
+        len(cfg.topics)
+        * _LLM_QUERIES_PER_TOPIC
+        * n_sources
+        * cfg.max_results_per_query
+    )
+
+    if cfg.max_results_per_query < 25:
+        logger.warning(
+            "max_results_per_query=%d is very low. "
+            "Upper-bound raw paper count before filtering: ~%d. "
+            "After dedup + survey-signal + LLM filters you may end up with 0–5 papers. "
+            "Recommend max_results_per_query >= 50 for broad topics like 'Computer Vision'.",
+            cfg.max_results_per_query, raw_upper_bound,
+        )
+    elif raw_upper_bound < 200:
+        logger.warning(
+            "Estimated raw paper pool is only ~%d papers before filtering "
+            "(topics=%d × queries=%d × sources=%d × results=%d). "
+            "Consider increasing max_results_per_query (currently %d) "
+            "or adding more topics/subtopics.",
+            raw_upper_bound,
+            len(cfg.topics), _LLM_QUERIES_PER_TOPIC, n_sources,
+            cfg.max_results_per_query, cfg.max_results_per_query,
+        )
+
+
+def _arxiv_query_subset(queries: list[SearchQuery]) -> set[str]:
+    """
+    Return at most _ARXIV_MAX_QUERIES query strings spread evenly across topics,
+    so arXiv receives a representative but manageable load.
+    OpenAlex + CORE receive all queries, so coverage is not reduced.
+    """
+    by_topic: dict[str, list[str]] = defaultdict(list)
+    for q in queries:
+        by_topic[q.topic].append(q.query_string)
+
+    selected: list[str] = []
+    topic_iters = {t: iter(qs) for t, qs in by_topic.items()}
+    while len(selected) < _ARXIV_MAX_QUERIES and topic_iters:
+        exhausted = []
+        for topic, it in topic_iters.items():
+            if len(selected) >= _ARXIV_MAX_QUERIES:
+                break
+            try:
+                selected.append(next(it))
+            except StopIteration:
+                exhausted.append(topic)
+        for t in exhausted:
+            del topic_iters[t]
+
+    return set(selected)
+
+
+def _retrieve_all(
+    queries: list[SearchQuery],
+    retrievers,
+    cfg: AppConfig,
+) -> list[Paper]:
+    """
+    Fan out queries to all retrievers in parallel.
+
+    arXiv is capped at _ARXIV_MAX_QUERIES total (spread across topics) because:
+      - arXiv enforces a strict rate limit (1 req / 3 s) and 429s are common
+        when many queries fire concurrently.
+      - OpenAlex already indexes all arXiv papers with richer metadata, so
+        arXiv mostly adds coverage at the margins.
+    OpenAlex and CORE receive the full query set.
+    """
+    all_papers: list[Paper] = []
+    arxiv_allowed = _arxiv_query_subset(queries)
+    logger.info(
+        "arXiv capped at %d / %d queries; OpenAlex + CORE get all %d",
+        len(arxiv_allowed), len(queries), len(queries),
+    )
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(
+                retriever.search,
+                q.query_string,
+                q.topic,
+                cfg.year_from,
+                cfg.year_to,
+                cfg.max_results_per_query,
+            ): (retriever.source_name, q.query_string)
+            for q in queries
+            for retriever in retrievers
+            if retriever.source_name != "arxiv" or q.query_string in arxiv_allowed
+        }
+        for future in as_completed(futures):
+            source, query = futures[future]
+            try:
+                all_papers.extend(future.result())
+            except Exception as exc:
+                logger.warning("Retriever %s failed for query %r: %s", source, query, exc)
+
+    return all_papers
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    args = parse_args()
+    try:
+        if args.mode == "fetch":
+            run_fetch(args)
+        elif args.mode == "analyze":
+            run_analyze(args)
+        else:
+            run_pipeline(args)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user.")
+        sys.exit(0)
+    except Exception as exc:
+        logger.error("Pipeline failed: %s", exc, exc_info=True)
+        sys.exit(1)

@@ -1,0 +1,19 @@
+# Venue quality scores (max 20 points).
+# Higher scores go to dedicated survey journals and top-tier ML/AI venues.
+venues:
+  ACM Computing Surveys: 20
+  Foundations and Trends in Machine Learning: 20
+  Journal of Machine Learning Research: 18
+  IEEE Transactions on Pattern Analysis and Machine Intelligence: 18
+  Nature Machine Intelligence: 18
+  Artificial Intelligence Review: 17
+  IEEE Transactions on Neural Networks and Learning Systems: 16
+  Transactions of the Association for Computational Linguistics: 16
+  NeurIPS: 15
+  ICML: 15
+  ICLR: 15
+  ACL: 15
+  EMNLP: 14
+  AAAI: 13
+  IJCAI: 13
+  arXiv: 8
