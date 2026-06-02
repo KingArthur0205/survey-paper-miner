@@ -521,6 +521,38 @@ def _run_analyze_steps(
             "(%d marked 'skip' — moved to bottom of results).",
             len(scored_papers), skip_count,
         )
+
+        # ── Hard topic-relevance filter ────────────────────────────────
+        # Drop papers whose topic_relevance score is below the configured
+        # threshold.  Runs after re-ranking so the order is already correct.
+        min_rel = cfg.min_topic_relevance
+        if min_rel > 1:
+            before_rel = len(scored_papers)
+            removed_rel: list[str] = []
+            kept_papers: list = []
+            for sp in scored_papers:
+                jr = judge_map.get(sp.paper.title)
+                relevance = jr.topic_relevance if (jr and not jr.judge_failed) else 3
+                if relevance >= min_rel:
+                    kept_papers.append(sp)
+                else:
+                    removed_rel.append(
+                        f"'{sp.paper.title[:55]}' (relevance={relevance})"
+                    )
+            scored_papers = kept_papers
+            if removed_rel:
+                logger.info(
+                    "Topic-relevance filter (>= %d): removed %d / %d papers.",
+                    min_rel, len(removed_rel), before_rel,
+                )
+                for entry in removed_rel:
+                    logger.info("  ✗ %s", entry)
+            else:
+                logger.info(
+                    "Topic-relevance filter (>= %d): all %d papers passed.",
+                    min_rel, before_rel,
+                )
+
     elif args.no_judge:
         logger.info("Skipping LLM judge (--no-judge).")
     elif not summary_pairs:

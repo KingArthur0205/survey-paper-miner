@@ -49,6 +49,11 @@ class AppConfig:
 
     # LLM-as-Judge settings
     judge_top_n: int = 50            # how many summarised papers to judge
+    # After judging, drop papers whose topic_relevance score is below this threshold.
+    # Scale: 1=off-topic  2=tangential  3=related  4=directly relevant  5=exact topic.
+    # Default 3 keeps "related but not specific" papers (e.g. conceptual agent taxonomy
+    # when searching for Agentic RAG).  Set to 4 to require direct relevance.
+    min_topic_relevance: int = 3
 
     # Research-gap detection thresholds
     gap_min_surveys: int = 3         # min surveys that must mention a gap
@@ -112,6 +117,7 @@ def load_config(
         mega_architecture_enabled=raw.get("mega_architecture_enabled", True),
         canonical_detector_enabled=llm_raw.get("canonical_detector_enabled", True),
         judge_top_n=llm_raw.get("judge_top_n", 50),
+        min_topic_relevance=raw.get("min_topic_relevance", 3),
         gap_min_surveys=llm_raw.get("gap_min_surveys", 3),
         gap_frequency_threshold=llm_raw.get("gap_frequency_threshold", 0.3),
     )

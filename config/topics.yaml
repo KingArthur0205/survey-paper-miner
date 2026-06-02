@@ -4,7 +4,15 @@ max_results_per_query: 500
 top_n_to_summarize: 30
 
 # LLM-in-education papers are newer → fewer citations → lower threshold
-min_quality_score: 15
+# Average 15
+# Strict 25
+min_quality_score: 25
+
+# After judging, drop papers whose topic_relevance is below this value.
+# 1=off-topic  2=tangential  3=related  4=directly relevant  5=exact topic
+# 4 = require papers to be specifically about your topic (recommended for narrow topics)
+# 3 = also keep conceptually related background papers (default)
+min_topic_relevance: 4
 
 survey_terms:
   - survey
@@ -14,4 +22,4 @@ survey_terms:
 
 topics:
   # Broad catch-all — captures the main survey body
-  - Computer Vision
+  - Agentic RAG Systems

@@ -153,6 +153,7 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
         "max_results_per_query":     run_cfg["max_results"],
         "top_n_to_summarize":        run_cfg["top_n"],
         "min_quality_score":         run_cfg["min_score"],
+        "min_topic_relevance":       run_cfg["min_topic_relevance"],
         "output_dir":                run_cfg["output_dir"],
         "architecture_enabled":      run_cfg["use_architecture"],
         "mega_architecture_enabled": run_cfg["use_architecture"],
@@ -376,7 +377,7 @@ with c4:
              "Lower = cheaper & faster; higher = more comprehensive.",
     )
 
-c5, c6 = st.columns([1, 3])
+c5, c6, c7 = st.columns([1, 1, 2])
 with c5:
     min_score = st.number_input(
         "Min quality score",
@@ -386,6 +387,25 @@ with c5:
              "The score is out of 100 and combines venue quality, citation impact, "
              "survey signal strength, structure, and recency. "
              "15–20 is a good default; lower it if you are getting too few results.",
+    )
+with c6:
+    min_topic_relevance = st.selectbox(
+        "Min topic relevance",
+        options=[1, 2, 3, 4, 5],
+        index=2,   # default = 3
+        format_func={
+            1: "1 — off-topic (no filter)",
+            2: "2 — tangential",
+            3: "3 — related (default)",
+            4: "4 — directly relevant",
+            5: "5 — exact topic only",
+        }.__getitem__,
+        help="After judging, papers below this topic-relevance score are removed. "
+             "The judge rates 1–5 how specifically a paper addresses your configured topics. "
+             "3 keeps related background papers (e.g. a conceptual agent taxonomy when "
+             "searching for Agentic RAG). "
+             "4 requires papers to be directly about the topic. "
+             "5 keeps only papers that are precisely about your topic.",
     )
 
 st.divider()
@@ -633,7 +653,8 @@ if run_btn and not st.session_state.running:
         year_to           = int(year_to),
         max_results       = int(max_results),
         top_n             = int(top_n),
-        min_score         = float(min_score),
+        min_score             = float(min_score),
+        min_topic_relevance   = int(min_topic_relevance),
         output_dir        = output_dir,
         db_path           = db_path,
         papers_file       = papers_file,
