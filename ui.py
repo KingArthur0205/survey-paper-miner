@@ -164,57 +164,74 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
     return path
 
 
-def _pick_directory(initial: str) -> str | None:
+def _render_folder_browser() -> None:
     """
-    Open a native OS folder-picker dialog and return the chosen path,
-    or None if the user cancelled.
+    Inline folder browser rendered inside a st.popover.
 
-    macOS: uses osascript (AppleScript) — always available, shows the real
-    Finder dialog, and has no thread-safety issues.
-
-    Other platforms: spawns a tiny subprocess that owns its own main thread
-    and runs tkinter's filedialog there (avoids the Streamlit background-
-    thread restriction that prevents tkinter from opening on the calling thread).
+    Displays the filesystem directly in the Streamlit UI — no native dialogs,
+    no subprocess, no permission issues.  Uses st.session_state["browse_path"]
+    as the cursor and updates st.session_state["output_dir"] when the user
+    clicks 'Select'.
     """
-    import platform
-    import subprocess
-
-    initial_dir = initial if Path(initial).is_dir() else str(Path.home())
-
-    # ── macOS — AppleScript ───────────────────────────────────────────────────
-    if platform.system() == "Darwin":
-        script = (
-            f'POSIX path of (choose folder '
-            f'with prompt "Select output folder" '
-            f'default location POSIX file {repr(initial_dir)})'
+    # Initialise the browse cursor to the current output dir (or home)
+    if "browse_path" not in st.session_state or not st.session_state["browse_path"]:
+        st.session_state["browse_path"] = (
+            st.session_state.get("output_dir") or str(Path.home())
         )
-        try:
-            proc = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode == 0:
-                # osascript appends a newline and a trailing slash
-                return proc.stdout.strip().rstrip("/") or None
-        except Exception:
-            pass
-        return None
 
-    # ── Windows / Linux — tkinter in a subprocess ─────────────────────────────
-    tk_script = (
-        "import sys, tkinter as tk; from tkinter import filedialog; "
-        "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', True); root.lift(); "
-        f"d = filedialog.askdirectory(title='Select output folder', initialdir={repr(initial_dir)}); "
-        "root.destroy(); sys.stdout.write(d)"
-    )
+    cursor = Path(st.session_state["browse_path"])
+    if not cursor.is_dir():
+        cursor = Path.home()
+        st.session_state["browse_path"] = str(cursor)
+
+    # ── breadcrumb ──────────────────────────────────────────────────────
+    st.caption(f"📍 `{cursor}`")
+
+    col_up, col_sel = st.columns([1, 2])
+    with col_up:
+        parent = cursor.parent
+        if parent != cursor:
+            if st.button("⬆ Up", use_container_width=True, key="fb_up"):
+                st.session_state["browse_path"] = str(parent)
+                st.rerun()
+    with col_sel:
+        if st.button(
+            "✓ Select this folder",
+            use_container_width=True,
+            key="fb_select",
+            type="primary",
+        ):
+            st.session_state["output_dir"] = str(cursor)
+            st.rerun()
+
+    st.divider()
+
+    # ── subdirectory list ────────────────────────────────────────────────
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", tk_script],
-            capture_output=True, text=True, timeout=120,
+        entries = sorted(
+            [d for d in cursor.iterdir() if d.is_dir() and not d.name.startswith(".")],
+            key=lambda d: d.name.lower(),
         )
-        return proc.stdout.strip() or None
-    except Exception:
-        return None
+    except PermissionError:
+        st.warning("Permission denied — cannot read this directory.")
+        return
+
+    if not entries:
+        st.caption("*(no subdirectories)*")
+        return
+
+    for d in entries[:40]:
+        c1, c2, c3 = st.columns([3, 1, 1])
+        c1.markdown(f"📁 `{d.name}`")
+        if c2.button("Open", key=f"fb_open_{d.name}", use_container_width=True):
+            st.session_state["browse_path"] = str(d)
+            st.rerun()
+        if c3.button("Use", key=f"fb_use_{d.name}", use_container_width=True):
+            st.session_state["output_dir"] = str(d)
+            st.rerun()
+
+    if len(entries) > 40:
+        st.caption(f"*(showing first 40 of {len(entries)} folders)*")
 
 
 def _build_cmd(run_cfg: dict, config_path: str) -> list[str]:
@@ -549,12 +566,6 @@ st.markdown(
 
 dir_col, btn_col = st.columns([5, 1])
 with dir_col:
-    # key="output_dir" binds the widget directly to st.session_state["output_dir"].
-    # Streamlit reads AND writes the session-state value automatically, so when
-    # Browse updates st.session_state["output_dir"] and calls st.rerun() the box
-    # reflects the new path.  Using value= instead of key= only sets the initial
-    # value and is then ignored on subsequent reruns — which is why the old Browse
-    # implementation appeared to do nothing.
     output_dir = st.text_input(
         "output_dir_field",
         key="output_dir",
@@ -562,12 +573,9 @@ with dir_col:
         label_visibility="collapsed",
     )
 with btn_col:
-    st.write("")   # nudge button down to align with the text input
-    if st.button("📂 Browse", use_container_width=True, help="Open a folder picker"):
-        picked = _pick_directory(st.session_state["output_dir"])
-        if picked:
-            st.session_state["output_dir"] = picked
-            st.rerun()
+    st.write("")   # vertical alignment
+    with st.popover("📂 Browse", use_container_width=True):
+        _render_folder_browser()
 
 st.divider()
 
