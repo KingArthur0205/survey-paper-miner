@@ -166,25 +166,53 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
 
 def _pick_directory(initial: str) -> str | None:
     """
-    Open a native OS directory-picker dialog and return the chosen path,
+    Open a native OS folder-picker dialog and return the chosen path,
     or None if the user cancelled.
 
-    Uses tkinter's filedialog — available on macOS, Windows, and Linux
-    (install python3-tk on Linux if missing).  The dialog is raised to the
-    front with wm_attributes so it doesn't hide behind the browser window.
+    macOS: uses osascript (AppleScript) — always available, shows the real
+    Finder dialog, and has no thread-safety issues.
+
+    Other platforms: spawns a tiny subprocess that owns its own main thread
+    and runs tkinter's filedialog there (avoids the Streamlit background-
+    thread restriction that prevents tkinter from opening on the calling thread).
     """
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()                         # hide the empty Tk root window
-        root.wm_attributes("-topmost", True)    # raise dialog above other windows
-        chosen = filedialog.askdirectory(
-            title="Select output directory",
-            initialdir=initial if Path(initial).is_dir() else ".",
+    import platform
+    import subprocess
+
+    initial_dir = initial if Path(initial).is_dir() else str(Path.home())
+
+    # ── macOS — AppleScript ───────────────────────────────────────────────────
+    if platform.system() == "Darwin":
+        script = (
+            f'POSIX path of (choose folder '
+            f'with prompt "Select output folder" '
+            f'default location POSIX file {repr(initial_dir)})'
         )
-        root.destroy()
-        return chosen or None
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0:
+                # osascript appends a newline and a trailing slash
+                return proc.stdout.strip().rstrip("/") or None
+        except Exception:
+            pass
+        return None
+
+    # ── Windows / Linux — tkinter in a subprocess ─────────────────────────────
+    tk_script = (
+        "import sys, tkinter as tk; from tkinter import filedialog; "
+        "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', True); root.lift(); "
+        f"d = filedialog.askdirectory(title='Select output folder', initialdir={repr(initial_dir)}); "
+        "root.destroy(); sys.stdout.write(d)"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", tk_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        return proc.stdout.strip() or None
     except Exception:
         return None
 
