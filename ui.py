@@ -549,18 +549,22 @@ st.markdown(
 
 dir_col, btn_col = st.columns([5, 1])
 with dir_col:
+    # key="output_dir" binds the widget directly to st.session_state["output_dir"].
+    # Streamlit reads AND writes the session-state value automatically, so when
+    # Browse updates st.session_state["output_dir"] and calls st.rerun() the box
+    # reflects the new path.  Using value= instead of key= only sets the initial
+    # value and is then ignored on subsequent reruns — which is why the old Browse
+    # implementation appeared to do nothing.
     output_dir = st.text_input(
         "output_dir_field",
-        value=st.session_state["output_dir"],
+        key="output_dir",
         placeholder="data/exports",
         label_visibility="collapsed",
     )
-    # Keep state in sync when the user edits the path manually
-    st.session_state["output_dir"] = output_dir
 with btn_col:
     st.write("")   # nudge button down to align with the text input
     if st.button("📂 Browse", use_container_width=True, help="Open a folder picker"):
-        picked = _pick_directory(output_dir)
+        picked = _pick_directory(st.session_state["output_dir"])
         if picked:
             st.session_state["output_dir"] = picked
             st.rerun()
