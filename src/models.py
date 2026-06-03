@@ -126,6 +126,20 @@ class JudgeResult(BaseModel):
     # 4 = directly relevant     5 = exactly this topic
     topic_relevance: int = 3
 
+    # True when the paper surveys the topic *within one narrow application
+    # vertical* (e.g. clinical/medical, finance, agriculture, materials,
+    # software-engineering) rather than the general architecture/field.
+    # Such papers can be on-topic (high topic_relevance) yet poor as a
+    # general reference — this flag lets the pipeline filter them separately.
+    is_domain_specific: bool = False
+
+    # Final inclusion tier, mirroring a manual relevance audit:
+    #   "core"     = directly and specifically surveys the topic — primary source
+    #   "useful"   = strong related survey providing important context
+    #   "marginal" = tangential, domain-specific application, or non-survey
+    #   "cut"      = off-topic, non-English, or clearly not a survey
+    paper_tier: str = "useful"
+
     # "must_read" | "worth_reading" | "optional" | "skip"
     recommended_action: str = ""
     confidence: float = 0.0

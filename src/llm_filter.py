@@ -44,15 +44,19 @@ _SYSTEM_PROMPT = (
     "domain that applies the technology, or a tool that uses it as a component.\n\n"
 
     "Always mark FALSE for:\n"
+    "- Papers NOT written in English (e.g. a Portuguese, Spanish, or Chinese title).\n"
     "- Tool / framework papers that USE the technology for a different purpose.\n"
     "  Example: 'LatteReview: A Multi-Agent Framework for Conducting Systematic Reviews' "
     "  uses agents as a mechanism to run reviews — it does NOT survey agentic AI or RAG.\n"
-    "- Domain-specific application papers when the topic is not that domain.\n"
-    "  Example: 'RAG for Biomedical Question Answering' is NOT relevant to a general "
-    "'Agentic RAG' or 'Retrieval-Augmented Generation' topic.\n"
-    "  Example: 'Agentic AI in Remote Sensing' is NOT relevant to 'Agentic RAG'.\n"
+    "- Primary research / system papers that introduce ONE new framework, model, or "
+    "  implementation (even if titled 'comprehensive' and including a related-work section).\n"
+    "- Domain-specific application papers when the topic is general.\n"
+    "  Example: 'RAG for Biomedical Question Answering', 'Agentic AI in Remote Sensing', "
+    "  'Multi-Agent RAG for Clinical Decision Support', '... in Finance', '... in Agriculture' "
+    "  are NOT relevant to a general 'Agentic RAG' topic.\n"
+    "- Over-broad overviews where the topic is only a minor subsection "
+    "  (e.g. an 'AGI and GenAI trends' review when the topic is 'Agentic RAG').\n"
     "- Papers that only mention the topic in passing or use it as a baseline.\n"
-    "- Primary research papers that propose a new system, model, or algorithm.\n"
     "- Papers about a clearly different topic that shares surface-level keywords.\n\n"
 
     "Return ONLY a JSON array of booleans, one per paper, in the same order as the input. "
@@ -158,9 +162,11 @@ def _classify_batch(
 
     prompt = (
         f"Research topics being surveyed:\n{topics_text}\n\n"
-        f"For each paper below, answer: does this paper SURVEY one of the topics above "
-        f"as its primary subject? (true) Or is it off-topic, domain-specific, a tool paper, "
-        f"or primary research? (false)\n\n"
+        f"For each paper below, mark TRUE only if it is an English-language SURVEY/REVIEW "
+        f"whose PRIMARY subject is one of the topics above, covering the general field "
+        f"(not one narrow application vertical). Mark FALSE if it is non-English, a "
+        f"tool/system/primary-research paper, a domain-specific application, an over-broad "
+        f"overview, or off-topic.\n\n"
         + "\n\n".join(paper_blocks)
         + f"\n\nReturn a JSON array of exactly {len(papers)} booleans in input order."
     )

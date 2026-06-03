@@ -55,6 +55,19 @@ class AppConfig:
     # when searching for Agentic RAG).  Set to 4 to require direct relevance.
     min_topic_relevance: int = 3
 
+    # After judging, keep only papers at or above this inclusion tier.
+    # Tier order: core > useful > marginal > cut.
+    #   "core"     = only primary, general surveys of the exact topic (strictest)
+    #   "useful"   = core + strong related/context surveys (recommended default)
+    #   "marginal" = also keep domain-specific & non-survey papers (loose)
+    #   "cut"      = keep everything the judge saw (no tier filtering)
+    min_paper_tier: str = "useful"
+
+    # When True, drop papers the judge flags as domain-specific (scoped to one
+    # vertical like clinical/finance/agriculture) even if they are otherwise
+    # on-topic surveys.  Independent of min_paper_tier.
+    exclude_domain_specific: bool = False
+
     # Research-gap detection thresholds
     gap_min_surveys: int = 3         # min surveys that must mention a gap
     gap_frequency_threshold: float = 0.3  # fraction of surveys for "frequency" gap
@@ -118,6 +131,8 @@ def load_config(
         canonical_detector_enabled=llm_raw.get("canonical_detector_enabled", True),
         judge_top_n=llm_raw.get("judge_top_n", 50),
         min_topic_relevance=raw.get("min_topic_relevance", 3),
+        min_paper_tier=raw.get("min_paper_tier", "useful"),
+        exclude_domain_specific=raw.get("exclude_domain_specific", False),
         gap_min_surveys=llm_raw.get("gap_min_surveys", 3),
         gap_frequency_threshold=llm_raw.get("gap_frequency_threshold", 0.3),
     )

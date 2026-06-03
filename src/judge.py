@@ -33,14 +33,19 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _CACHE_DIR = "data/cache/llm/judge"
+# Bump when the judge schema or prompt changes so stale cached assessments
+# (made with an older rubric) are not reused.
+_JUDGE_SCHEMA_VERSION = "v2-tier"
 
 _JUDGE_SCHEMA = """
 {
   "is_survey": true,
+  "is_domain_specific": false,
   "authority_assessment": "foundational | current_standard | emerging | not_a_survey",
   "scope_clarity": "broad | narrow | unclear",
   "coverage_depth": "comprehensive | partial | shallow",
   "topic_relevance": 4,
+  "paper_tier": "core | useful | marginal | cut",
   "strengths": ["strength 1", "strength 2"],
   "weaknesses": ["weakness 1"],
   "recommended_action": "must_read | worth_reading | optional | skip",
@@ -49,19 +54,47 @@ _JUDGE_SCHEMA = """
 """.strip()
 
 _SYSTEM = (
-    "You are an expert academic reviewer assessing survey/review papers in AI. "
-    "When research topics are provided, your PRIMARY duty is to assess how specifically "
-    "this paper addresses those exact topics — not just whether it is a good paper. "
-    "topic_relevance scale: "
-    "1=completely off-topic (different domain or application area), "
-    "2=tangential (shares some keywords but core focus is elsewhere), "
-    "3=related but not specific (covers the general area, not the exact topic), "
-    "4=directly relevant (clearly about this topic), "
-    "5=exactly this topic (the paper is precisely about what was asked for). "
-    "Rules: "
-    "If topic_relevance <= 2, set recommended_action to 'skip'. "
-    "If is_survey is false, set recommended_action to 'skip'. "
-    "If the abstract is under 100 words, set confidence to at most 0.5. "
+    "You are an expert academic reviewer deciding which papers belong in a focused "
+    "literature review on the user's EXACT research topic. Your job is to separate "
+    "primary survey sources from noise. Be strict.\n\n"
+
+    "Assess FOUR independent signals, then assign a final tier.\n\n"
+
+    "1. is_survey (bool): TRUE only if the paper REVIEWS/SURVEYS existing literature. "
+    "FALSE if it is a primary research paper, a system/framework/tool paper that "
+    "introduces ONE new method or implementation, a benchmark paper, or a position "
+    "paper. A title containing 'survey'/'review' is NOT sufficient — a paper that "
+    "proposes a novel framework and merely includes a related-work section is NOT a "
+    "survey (is_survey=false).\n\n"
+
+    "2. is_domain_specific (bool): TRUE if the paper surveys the topic only WITHIN one "
+    "narrow application vertical — e.g. healthcare/clinical/medical, finance/business, "
+    "agriculture, materials science, software engineering, law, education, remote "
+    "sensing. A general architecture survey is is_domain_specific=false; "
+    "'<Topic> for Clinical Decision Support' or '<Topic> in Finance' is "
+    "is_domain_specific=true.\n\n"
+
+    "3. topic_relevance (1-5): how specifically the paper addresses the EXACT topic. "
+    "1=off-topic (different field), 2=tangential (shared keywords, different focus), "
+    "3=related but broader/adjacent (the general area, not the exact topic), "
+    "4=directly relevant, 5=exactly this topic.\n\n"
+
+    "4. paper_tier — combine the above into a final inclusion decision:\n"
+    "   'core'     = is_survey=true AND topic_relevance>=4 AND is_domain_specific=false. "
+    "A primary, general survey of the exact topic.\n"
+    "   'useful'   = a genuine survey with topic_relevance 3-4 that provides important "
+    "context (foundational background, a key sub-area, or an adjacent survey), "
+    "is_domain_specific=false.\n"
+    "   'marginal' = ANY of: is_domain_specific=true, OR is_survey=false (system/tool/"
+    "primary paper), OR topic_relevance=2. Keep only if domain coverage is wanted.\n"
+    "   'cut'      = topic_relevance<=1, OR not in English, OR not a survey AND not "
+    "specifically about the topic. Off-topic noise.\n\n"
+
+    "Consistency rules:\n"
+    "- If paper_tier is 'marginal' or 'cut', set recommended_action to 'skip'.\n"
+    "- If is_survey is false, paper_tier cannot be 'core' or 'useful'.\n"
+    "- If is_domain_specific is true, paper_tier cannot be 'core'.\n"
+    "- If the abstract is under 100 words, set confidence to at most 0.5.\n"
     "Return ONLY valid JSON. Do not invent information not in the input."
 )
 
@@ -134,6 +167,7 @@ class LLMJudge:
             summary.research_scope or "",
             "|".join(sorted(self._topics)),
             _MODEL,
+            _JUDGE_SCHEMA_VERSION,
         )
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -230,6 +264,9 @@ def _build_prompt(paper: Paper, summary: PaperSummary, topics: list[str]) -> str
 # Parser
 # ---------------------------------------------------------------------------
 
+_VALID_TIERS = ("core", "useful", "marginal", "cut")
+
+
 def _build_result(title: str, data: dict) -> JudgeResult:
     # Clamp topic_relevance to the 1-5 scale in case the model drifts
     raw_relevance = data.get("topic_relevance", 3)
@@ -238,18 +275,68 @@ def _build_result(title: str, data: dict) -> JudgeResult:
     except (TypeError, ValueError):
         topic_relevance = 3
 
+    is_survey = bool(data.get("is_survey", True))
+    is_domain_specific = bool(data.get("is_domain_specific", False))
+
+    tier = str(data.get("paper_tier", "")).strip().lower()
+    if tier not in _VALID_TIERS:
+        tier = _derive_tier(is_survey, is_domain_specific, topic_relevance)
+
+    # Deterministically enforce the consistency rules so a single sloppy LLM
+    # response can't promote a domain-specific or non-survey paper to core/useful.
+    tier = _enforce_tier_rules(tier, is_survey, is_domain_specific, topic_relevance)
+
+    action = str(data.get("recommended_action", ""))
+    if tier in ("marginal", "cut"):
+        action = "skip"
+
     return JudgeResult(
         paper_title=title,
-        is_survey=bool(data.get("is_survey", True)),
+        is_survey=is_survey,
+        is_domain_specific=is_domain_specific,
         authority_assessment=str(data.get("authority_assessment", "")),
         scope_clarity=str(data.get("scope_clarity", "")),
         coverage_depth=str(data.get("coverage_depth", "")),
         topic_relevance=topic_relevance,
+        paper_tier=tier,
         strengths=[str(s) for s in (data.get("strengths") or [])],
         weaknesses=[str(w) for w in (data.get("weaknesses") or [])],
-        recommended_action=str(data.get("recommended_action", "")),
+        recommended_action=action,
         confidence=float(data.get("confidence", 0.0)),
     )
+
+
+def _derive_tier(is_survey: bool, is_domain_specific: bool, relevance: int) -> str:
+    """Derive a tier from the component signals when the LLM omits one."""
+    if relevance <= 1 or not is_survey:
+        return "cut" if relevance <= 1 else "marginal"
+    if relevance == 2 or is_domain_specific:
+        return "marginal"
+    if relevance >= 4:
+        return "core"
+    return "useful"   # relevance == 3
+
+
+def _enforce_tier_rules(
+    tier: str, is_survey: bool, is_domain_specific: bool, relevance: int
+) -> str:
+    """
+    Clamp the LLM's tier down to what the component signals allow.  Never
+    promotes; only demotes.  This guarantees the documented invariants:
+      - non-survey  → at most 'marginal'
+      - domain-specific → at most 'useful' (never 'core')
+      - relevance <= 1 → 'cut'
+      - relevance == 2 → at most 'marginal'
+    """
+    if relevance <= 1:
+        return "cut"
+    if not is_survey and tier in ("core", "useful"):
+        tier = "marginal"
+    if is_domain_specific and tier == "core":
+        tier = "useful"
+    if relevance == 2 and tier in ("core", "useful"):
+        tier = "marginal"
+    return tier
 
 
 def _strip_fences(text: str) -> str:

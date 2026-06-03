@@ -14,6 +14,17 @@ min_quality_score: 25
 # 3 = also keep conceptually related background papers (default)
 min_topic_relevance: 4
 
+# Keep only papers at or above this inclusion tier (core > useful > marginal > cut).
+#   core     = only primary, general surveys of the exact topic (strictest)
+#   useful   = core + strong related/context surveys (recommended)
+#   marginal = also keep domain-specific & non-survey papers
+#   cut      = no tier filtering
+min_paper_tier: core
+
+# Drop papers scoped to one narrow vertical (clinical, finance, agriculture, etc.)
+# even if otherwise on-topic. True is recommended for a general architecture survey.
+exclude_domain_specific: true
+
 survey_terms:
   - survey
   - review

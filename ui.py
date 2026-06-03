@@ -154,6 +154,8 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
         "top_n_to_summarize":        run_cfg["top_n"],
         "min_quality_score":         run_cfg["min_score"],
         "min_topic_relevance":       run_cfg["min_topic_relevance"],
+        "min_paper_tier":            run_cfg["min_paper_tier"],
+        "exclude_domain_specific":   run_cfg["exclude_domain_specific"],
         "output_dir":                run_cfg["output_dir"],
         "architecture_enabled":      run_cfg["use_architecture"],
         "mega_architecture_enabled": run_cfg["use_architecture"],
@@ -422,7 +424,7 @@ with c4:
              "Lower = cheaper & faster; higher = more comprehensive.",
     )
 
-c5, c6, c7 = st.columns([1, 1, 2])
+c5, c6 = st.columns(2)
 with c5:
     min_score = st.number_input(
         "Min quality score",
@@ -437,20 +439,48 @@ with c6:
     min_topic_relevance = st.selectbox(
         "Min topic relevance",
         options=[1, 2, 3, 4, 5],
-        index=2,   # default = 3
+        index=3,   # default = 4 (directly relevant)
         format_func={
             1: "1 — off-topic (no filter)",
             2: "2 — tangential",
-            3: "3 — related (default)",
-            4: "4 — directly relevant",
+            3: "3 — related",
+            4: "4 — directly relevant (default)",
             5: "5 — exact topic only",
         }.__getitem__,
         help="After judging, papers below this topic-relevance score are removed. "
              "The judge rates 1–5 how specifically a paper addresses your configured topics. "
-             "3 keeps related background papers (e.g. a conceptual agent taxonomy when "
-             "searching for Agentic RAG). "
-             "4 requires papers to be directly about the topic. "
-             "5 keeps only papers that are precisely about your topic.",
+             "4 requires papers to be directly about the topic (recommended). "
+             "3 also keeps related background papers.",
+    )
+
+c7, c8 = st.columns(2)
+with c7:
+    min_paper_tier = st.selectbox(
+        "Min inclusion tier",
+        options=["core", "useful", "marginal", "cut"],
+        index=1,   # default = useful
+        format_func={
+            "core":     "core — primary surveys only (strict)",
+            "useful":   "useful — core + context (default)",
+            "marginal": "marginal — also domain/non-survey",
+            "cut":      "cut — no tier filter",
+        }.__getitem__,
+        help="The judge assigns each paper a tier: "
+             "core (primary general survey of the exact topic), "
+             "useful (strong related/context survey), "
+             "marginal (domain-specific application or non-survey paper), "
+             "cut (off-topic or non-English). "
+             "Papers below the selected tier are removed. "
+             "'core' gives the cleanest, most focused set.",
+    )
+with c8:
+    exclude_domain_specific = st.checkbox(
+        "Exclude domain-specific papers",
+        value=False,
+        help="Drop papers scoped to one narrow vertical (clinical, finance, agriculture, "
+             "materials, software engineering…) even if they are on-topic surveys. "
+             "Recommended when you want a general architecture survey rather than "
+             "domain applications.",
     )
 
 st.divider()
@@ -693,8 +723,10 @@ if run_btn and not st.session_state.running:
         year_to           = int(year_to),
         max_results       = int(max_results),
         top_n             = int(top_n),
-        min_score             = float(min_score),
-        min_topic_relevance   = int(min_topic_relevance),
+        min_score               = float(min_score),
+        min_topic_relevance     = int(min_topic_relevance),
+        min_paper_tier          = str(min_paper_tier),
+        exclude_domain_specific = bool(exclude_domain_specific),
         output_dir        = output_dir,
         db_path           = db_path,
         papers_file       = papers_file,

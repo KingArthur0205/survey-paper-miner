@@ -522,56 +522,73 @@ def _run_analyze_steps(
             len(scored_papers), skip_count,
         )
 
-        # ── Hard topic-relevance filter ────────────────────────────────
-        # Drop papers whose topic_relevance score is below the configured
-        # threshold.  Runs after re-ranking so the order is already correct.
-        min_rel = cfg.min_topic_relevance
-        if min_rel > 1:
-            before_rel = len(scored_papers)
-            removed_rel: list[str] = []
-            kept_papers: list = []
-            for sp in scored_papers:
-                jr = judge_map.get(sp.paper.title)
-                relevance = jr.topic_relevance if (jr and not jr.judge_failed) else 3
-                if relevance >= min_rel:
-                    kept_papers.append(sp)
-                else:
-                    removed_rel.append(
-                        f"'{sp.paper.title[:55]}' (relevance={relevance})"
-                    )
-            scored_papers = kept_papers
-            if removed_rel:
-                logger.info(
-                    "Topic-relevance filter (>= %d): removed %d / %d papers.",
-                    min_rel, len(removed_rel), before_rel,
-                )
-                for entry in removed_rel:
-                    logger.info("  ✗ %s", entry)
+        # ── Hard relevance / tier / domain filters ─────────────────────
+        # Runs after re-ranking so the order is already correct.  A paper is
+        # dropped if it fails ANY of:
+        #   - topic_relevance < cfg.min_topic_relevance
+        #   - paper_tier below cfg.min_paper_tier   (core>useful>marginal>cut)
+        #   - is_domain_specific and cfg.exclude_domain_specific
+        _TIER_RANK = {"core": 3, "useful": 2, "marginal": 1, "cut": 0}
+        min_rel  = cfg.min_topic_relevance
+        min_tier = _TIER_RANK.get(cfg.min_paper_tier, 2)
+
+        before_filt = len(scored_papers)
+        removed: list[str] = []
+        kept_papers: list = []
+        for sp in scored_papers:
+            jr = judge_map.get(sp.paper.title)
+            if not jr or jr.judge_failed:
+                kept_papers.append(sp)   # never drop on a failed assessment
+                continue
+
+            reasons: list[str] = []
+            if jr.topic_relevance < min_rel:
+                reasons.append(f"relevance={jr.topic_relevance}<{min_rel}")
+            if _TIER_RANK.get(jr.paper_tier, 2) < min_tier:
+                reasons.append(f"tier={jr.paper_tier}")
+            if cfg.exclude_domain_specific and jr.is_domain_specific:
+                reasons.append("domain-specific")
+
+            if reasons:
+                removed.append(f"'{sp.paper.title[:50]}' [{', '.join(reasons)}]")
             else:
-                logger.info(
-                    "Topic-relevance filter (>= %d): all %d papers passed.",
-                    min_rel, before_rel,
-                )
+                kept_papers.append(sp)
+
+        scored_papers = kept_papers
+        if removed:
+            logger.info(
+                "Relevance/tier filter (min_relevance>=%d, min_tier=%s%s): "
+                "removed %d / %d papers.",
+                min_rel, cfg.min_paper_tier,
+                ", no-domain-specific" if cfg.exclude_domain_specific else "",
+                len(removed), before_filt,
+            )
+            for entry in removed:
+                logger.info("  ✗ %s", entry)
+        else:
+            logger.info(
+                "Relevance/tier filter: all %d judged papers passed.", before_filt
+            )
 
     elif args.no_judge:
         logger.info("Skipping LLM judge (--no-judge).")
     elif not summary_pairs:
         logger.info("Skipping LLM judge — no summaries available.")
 
-    # ── Filter summary_pairs to exclude 'skip' papers before architecture #
-    # Saves LLM tokens: papers the judge deems off-topic don't need deep  #
-    # architecture analysis.                                               #
+    # ── Align summary_pairs with the tier/relevance-filtered set ──────────
+    # Only papers that survived the relevance/tier filter (still present in
+    # scored_papers) proceed to architecture analysis.  This keeps exports and
+    # architecture analysis consistent and saves LLM tokens on dropped papers.
     if judge_map:
+        kept_titles = {sp.paper.title for sp in scored_papers}
         before = len(summary_pairs)
         summary_pairs = [
-            (sp, s) for sp, s in summary_pairs
-            if judge_map.get(sp.paper.title, JudgeResult(paper_title=sp.paper.title)).recommended_action != "skip"
-            or judge_map.get(sp.paper.title, JudgeResult(paper_title=sp.paper.title)).judge_failed
+            (sp, s) for sp, s in summary_pairs if sp.paper.title in kept_titles
         ]
         skipped = before - len(summary_pairs)
         if skipped:
             logger.info(
-                "Excluded %d 'skip' papers from architecture analysis "
+                "Excluded %d filtered-out papers from architecture analysis "
                 "(%d remain).", skipped, len(summary_pairs),
             )
 
