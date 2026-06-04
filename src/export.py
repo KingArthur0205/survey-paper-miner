@@ -1027,20 +1027,16 @@ def _render_part4_paper_cards(
             lines.append(f"| Covers | {' · '.join(summary.taxonomy[:5])} |")
         lines.append("")
 
-        # Taxonomy tree (text-art)
+        # Taxonomy tree — rendered as a Mermaid figure (not text-art)
         if arch.top_level_taxonomy:
             lines.append("**How this survey organises the field:**")
             lines.append("")
-            lines.append("```")
-            lines.append(p.title[:50])
-            for i, cat in enumerate(arch.top_level_taxonomy[:6]):
-                connector = "└──" if i == len(arch.top_level_taxonomy[:6]) - 1 else "├──"
-                lines.append(f"{connector} {cat}")
-                subs = arch.second_level_taxonomy.get(cat, [])
-                for j, sub in enumerate(subs[:4]):
-                    sub_conn = "    └──" if j == len(subs[:4]) - 1 else "    ├──"
-                    lines.append(f"{sub_conn} {sub}")
-            lines.append("```")
+            lines += _taxonomy_mermaid(
+                root_label=_short_title(p.title),
+                top_level=arch.top_level_taxonomy,
+                second_level=arch.second_level_taxonomy,
+                anchor=anchor,
+            )
             lines.append("")
 
         # Organizational logic
@@ -1506,3 +1502,59 @@ def _short_title(title: str, max_words: int = 5) -> str:
     if len(words) <= max_words:
         return title
     return " ".join(words[:max_words]) + "…"
+
+
+def _mermaid_label(text: str, max_len: int = 48) -> str:
+    """
+    Sanitise a string for use inside a Mermaid node label `id["..."]`.
+
+    Mermaid breaks on raw double-quotes and a few other characters even
+    inside quoted labels, so we replace/strip the problematic ones and
+    truncate long labels to keep the figure readable.
+    """
+    t = " ".join(str(text).split())          # collapse whitespace/newlines
+    t = t.replace('"', "'").replace("`", "'")
+    t = t.replace("[", "(").replace("]", ")")
+    t = t.replace("{", "(").replace("}", ")")
+    t = t.replace("|", "/").replace("#", "no.")
+    if len(t) > max_len:
+        t = t[: max_len - 1].rstrip() + "…"
+    return t or "—"
+
+
+def _taxonomy_mermaid(
+    root_label: str,
+    top_level: list[str],
+    second_level: dict[str, list[str]],
+    anchor: str,
+    max_top: int = 6,
+    max_sub: int = 4,
+) -> list[str]:
+    """
+    Render a survey's taxonomy as a Mermaid flowchart (left-to-right tree).
+
+    Produces an inline ```mermaid code block that renders as a real figure
+    on GitHub, VS Code, Obsidian, and most Markdown viewers — replacing the
+    old ASCII text-art tree.  `anchor` makes node IDs unique per paper card
+    so multiple diagrams on one page never collide.
+    """
+    # Node-id prefix unique to this card (strip non-alphanumerics from anchor)
+    pid = "t" + re.sub(r"[^a-zA-Z0-9]", "", anchor)[:12]
+
+    out: list[str] = ["```mermaid", "graph LR"]
+    root_id = f"{pid}root"
+    out.append(f'    {root_id}["{_mermaid_label(root_label)}"]')
+
+    for i, cat in enumerate(top_level[:max_top]):
+        cat_id = f"{pid}c{i}"
+        out.append(f'    {cat_id}["{_mermaid_label(cat)}"]')
+        out.append(f"    {root_id} --> {cat_id}")
+        for j, sub in enumerate(second_level.get(cat, [])[:max_sub]):
+            sub_id = f"{pid}c{i}s{j}"
+            out.append(f'    {sub_id}["{_mermaid_label(sub)}"]')
+            out.append(f"    {cat_id} --> {sub_id}")
+
+    # Style: highlight the root node so the survey title stands out
+    out.append(f"    style {root_id} fill:#dbeafe,stroke:#2563eb,stroke-width:2px")
+    out.append("```")
+    return out
