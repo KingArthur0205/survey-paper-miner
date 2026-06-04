@@ -42,11 +42,20 @@ _last_arxiv_download: float = 0.0
 # Email sent with Unpaywall requests (required by their polite-pool policy).
 _UNPAYWALL_EMAIL = "survey-miner@example.com"
 
-# Suppress pdfminer rendering noise (invalid float color values in malformed PDFs)
-# These warnings are harmless — pdfplumber still extracts text correctly.
-logging.getLogger("pdfminer.pdfinterp").setLevel(logging.ERROR)
-logging.getLogger("pdfminer.pdfdocument").setLevel(logging.ERROR)
-logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
+# Suppress pdfminer rendering noise (invalid float colours, missing FontBBox,
+# and other quirks of malformed PDFs). These warnings are harmless — pdfplumber
+# still extracts text correctly. Silence the whole pdfminer tree plus the
+# specific sub-loggers that emit at WARNING.
+for _name in (
+    "pdfminer",
+    "pdfminer.pdfinterp",
+    "pdfminer.pdfdocument",
+    "pdfminer.pdfpage",
+    "pdfminer.pdffont",
+    "pdfminer.cmapdb",
+    "pdfminer.layout",
+):
+    logging.getLogger(_name).setLevel(logging.ERROR)
 
 # Domain prefixes that almost always return 403/401 for automated access.
 # Papers from these sources are skipped early to avoid slow timeout waits.
