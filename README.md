@@ -2,6 +2,8 @@
 
 Automatically discovers, scores, and deeply analyses AI survey papers from OpenAlex and CORE. Given a list of research topics it retrieves papers, filters out non-surveys, ranks them by quality, and runs a suite of LLM passes to produce a structured literature review with architecture analysis, concept graphs, and a guided reading path.
 
+> 📐 **Architecture & pipeline diagrams + why each module exists:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ---
 
 ## How to use
