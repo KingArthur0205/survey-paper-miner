@@ -22,12 +22,14 @@ import re
 
 import requests
 
+from . import s2_client
 from .models import Paper
 from .retrievers.openalex import _parse_item
 
 logger = logging.getLogger(__name__)
 
 _OPENALEX_URL = "https://api.openalex.org/works"
+_S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 _MAILTO = "survey-miner@example.com"
 _NO_PROXY = {"http": None, "https": None}
 _SELECT = (
@@ -71,18 +73,15 @@ def retrieve_top_surveys(
 
     for topic in topics:
         kept_for_topic = 0
+        # Specific (agentic) query forms come first so they aren't crowded out
+        # by higher-cited broad surveys; each query merges OpenAlex + Semantic
+        # Scholar results, survey-titled and citation-sorted.
         for query in _query_variants(topic):
             if kept_for_topic >= per_topic:
                 break
-            for item in _title_search(query, year_from, year_to):
-                title = (item.get("title") or "").strip()
-                if not title or not _is_survey_title(title):
-                    continue
-                key = _norm(title)
+            for paper in _gather(query, topic, year_from, year_to):
+                key = _norm(paper.title)
                 if key in seen:
-                    continue
-                paper = _parse_item(item, topic, f"top-cited-survey: {query}")
-                if not paper:
                     continue
                 paper.from_top_survey = True
                 seen.add(key)
@@ -107,31 +106,40 @@ def retrieve_top_surveys(
 
 def _query_variants(topic: str) -> list[str]:
     """
-    Build title.search queries from a topic.
+    Build search queries from a topic, in priority order.
 
-    Produces a SPECIFIC query (full expanded topic) and a BROADER one (leading
-    qualifier dropped), each with 'survey' — so for "Agentic RAG Systems" we
-    search both "agentic retrieval augmented generation survey" (finds the
-    agentic surveys) and "retrieval augmented generation survey" (finds the
-    foundational/popular RAG surveys).
+    Generates BOTH the spelled-out form and the ACRONYM form, plus a broadened
+    variant — so for "Agentic RAG Systems" we search:
+      1. "agentic retrieval augmented generation survey"  (spelled-out specific)
+      2. "agentic rag survey"                              (acronym specific)
+      3. "retrieval augmented generation survey"           (broad foundational)
+    The acronym form is essential: many real surveys title themselves with
+    "Agentic RAG" / "RAG-Reasoning" rather than the spelled-out phrase, and a
+    spelled-out title query would never match them.
     """
-    words = _significant_words(topic)
-    if not words:
-        return []
+    expanded = _significant_words(topic, expand=True)
+    acronym = _significant_words(topic, expand=False)
     variants: list[str] = []
-    full = " ".join(words)
-    variants.append(f"{full} survey")
+    if expanded:
+        variants.append(f"{' '.join(expanded)} survey")
+    if acronym and acronym != expanded:
+        variants.append(f"{' '.join(acronym)} survey")
     # Broaden by dropping the leading qualifier word (e.g. "agentic")
-    if len(words) > 3:
-        variants.append(f"{' '.join(words[1:])} survey")
-    return variants
+    if len(expanded) > 3:
+        variants.append(f"{' '.join(expanded[1:])} survey")
+    # de-dupe while preserving order
+    seen: set[str] = set()
+    return [v for v in variants if not (v in seen or seen.add(v))]
 
 
-def _significant_words(topic: str) -> list[str]:
-    expanded: list[str] = []
+def _significant_words(topic: str, expand: bool = True) -> list[str]:
+    out: list[str] = []
     for w in re.findall(r"[a-z0-9]+", topic.lower()):
-        expanded.extend(_ACRONYMS.get(w, w).split())
-    return [w for w in expanded if w not in _FILLER and len(w) > 1]
+        if expand:
+            out.extend(_ACRONYMS.get(w, w).split())
+        else:
+            out.append(w)
+    return [w for w in out if w not in _FILLER and len(w) > 1]
 
 
 def _is_survey_title(title: str) -> bool:
@@ -139,7 +147,25 @@ def _is_survey_title(title: str) -> bool:
     return any(term in t for term in _SURVEY_TITLE_TERMS)
 
 
-def _title_search(query: str, year_from: int, year_to: int) -> list[dict]:
+def _gather(query: str, topic: str, year_from: int, year_to: int) -> list[Paper]:
+    """
+    Collect survey-titled candidate papers for one query from BOTH OpenAlex
+    (title search) and Semantic Scholar (broader preprint coverage), merged and
+    sorted by citation count.
+    """
+    papers: list[Paper] = []
+    for item in _openalex_title_search(query, year_from, year_to):
+        p = _parse_item(item, topic, f"top-cited-survey(oa): {query}")
+        if p:
+            papers.append(p)
+    papers.extend(_s2_survey_search(query, topic, year_from, year_to))
+
+    papers = [p for p in papers if _is_survey_title(p.title)]
+    papers.sort(key=lambda p: p.citation_count, reverse=True)
+    return papers
+
+
+def _openalex_title_search(query: str, year_from: int, year_to: int) -> list[dict]:
     params = {
         "filter": f"title.search:{query},publication_year:{year_from}-{year_to}",
         "sort": "cited_by_count:desc",
@@ -154,6 +180,52 @@ def _title_search(query: str, year_from: int, year_to: int) -> list[dict]:
     except Exception as exc:
         logger.debug("[top-survey] OpenAlex query failed for %r: %s", query, exc)
         return []
+
+
+def _s2_survey_search(query: str, topic: str, year_from: int, year_to: int) -> list[Paper]:
+    """Query Semantic Scholar (catches preprints OpenAlex misses, e.g. ACL/arXiv)."""
+    params = {
+        "query": query,
+        "limit": 20,
+        "year": f"{year_from}-{year_to}",
+        "fields": "title,year,citationCount,externalIds,abstract,authors",
+    }
+    resp = s2_client.get(_S2_SEARCH_URL, params=params)
+    if resp is None or resp.status_code != 200:
+        return []
+    try:
+        data = resp.json().get("data", []) or []
+    except Exception:
+        return []
+
+    papers: list[Paper] = []
+    for d in data:
+        title = (d.get("title") or "").strip()
+        if not title:
+            continue
+        ext = d.get("externalIds") or {}
+        doi = ext.get("DOI")
+        arxiv = ext.get("ArXiv")
+        url = (
+            f"https://doi.org/{doi}" if doi
+            else f"https://arxiv.org/abs/{arxiv}" if arxiv
+            else (d.get("url") or None)
+        )
+        authors = [a.get("name", "").strip() for a in (d.get("authors") or []) if a.get("name")]
+        papers.append(Paper(
+            title=title,
+            year=d.get("year"),
+            authors=authors,
+            abstract=d.get("abstract"),
+            doi=doi,
+            arxiv_id=arxiv,
+            url=url,
+            citation_count=d.get("citationCount") or 0,
+            sources=["semanticscholar"],
+            topic_queries=[topic],
+            generated_queries=[f"top-cited-survey(s2): {query}"],
+        ))
+    return papers
 
 
 def _norm(text: str) -> str:
