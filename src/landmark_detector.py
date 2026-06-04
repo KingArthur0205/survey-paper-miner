@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _CACHE_DIR = "data/cache/llm/landmarks"
+# Bump to force re-extraction of landmark candidates.
+_LANDMARK_VERSION = "v2-topic"
 _OPENALEX_URL = "https://api.openalex.org/works"
 _S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 _S2_API_KEY = s2_client.API_KEY   # whether an S2 key is configured
@@ -162,10 +164,16 @@ class LandmarkDetector:
         summary_pairs: list[tuple[ScoredPaper, PaperSummary]],
     ) -> list[dict]:
         prompt = _build_prompt(topic, summary_pairs)
-        cache_key = LLMCache.make_key(topic, prompt, _MODEL)
+        # Cache by TOPIC (not the full survey-summary prompt): a field's seminal
+        # primary papers are stable regardless of which exact surveys this run
+        # analysed, so the (high-quality) extraction is reused across runs. This
+        # makes the Landmark section reliable — a transient extraction failure on
+        # one run doesn't blank it out, because a prior good result is reused.
+        cache_key = LLMCache.make_key(topic.lower().strip(), _MODEL, _LANDMARK_VERSION)
         cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.info("[landmarks] cache hit for '%s'", topic)
+        if cached is not None and cached.get("landmarks"):
+            logger.info("[landmarks] cache hit for '%s' (%d candidates)",
+                        topic, len(cached.get("landmarks", [])))
             return cached.get("landmarks", [])
 
         try:
@@ -177,8 +185,12 @@ class LandmarkDetector:
             ) as stream:
                 raw = _strip_fences(stream.get_final_text())
             data = json.loads(raw)
-            self._cache.set(cache_key, data, label=topic[:60], model=_MODEL)
-            return data.get("landmarks", [])
+            landmarks = data.get("landmarks", [])
+            # Only cache a non-empty extraction, so a failed/empty run doesn't
+            # poison the cache and can be retried next time.
+            if landmarks:
+                self._cache.set(cache_key, data, label=topic[:60], model=_MODEL)
+            return landmarks
         except Exception as exc:
             logger.warning("[landmarks] extraction failed for '%s': %s", topic, exc)
             return []
