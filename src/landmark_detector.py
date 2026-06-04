@@ -25,13 +25,10 @@ from __future__ import annotations
 import json
 import logging
 
-import os
-import threading
-import time
-
 import anthropic
 import requests
 
+from . import s2_client
 from .config import AppConfig
 from .llm_cache import LLMCache
 from .models import LandmarkPaper, PaperSummary, ScoredPaper
@@ -42,15 +39,7 @@ _MODEL = "claude-sonnet-4-6"
 _CACHE_DIR = "data/cache/llm/landmarks"
 _OPENALEX_URL = "https://api.openalex.org/works"
 _S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-# Optional free key (https://www.semanticscholar.org/product/api) raises the
-# rate limit substantially. Read from either common env-var name.
-_S2_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or os.environ.get("S2_API_KEY") or ""
-
-# Serialise Semantic Scholar calls with a minimum gap — the keyless pool is
-# ~1 req/s and bursts get 429'd.
-_S2_LOCK = threading.Lock()
-_S2_MIN_INTERVAL = 1.2 if not _S2_API_KEY else 0.4
-_s2_last_call: float = 0.0
+_S2_API_KEY = s2_client.API_KEY   # whether an S2 key is configured
 _MAILTO = "survey-miner@example.com"
 _NO_PROXY = {"http": None, "https": None}
 
@@ -270,42 +259,20 @@ def _pick_best(query: str, candidates: list[dict]) -> dict | None:
 
 
 def _semantic_scholar_lookup(query: str) -> dict | None:
-    """Resolve via the Semantic Scholar search API (rate-limited, retried)."""
-    global _s2_last_call
-    headers = {"x-api-key": _S2_API_KEY} if _S2_API_KEY else {}
+    """Resolve via the Semantic Scholar search API (shared global rate limiter)."""
     params = {
         "query": query,
         "limit": 6,
         "fields": "title,year,citationCount,externalIds,url",
     }
-
-    # With a key, retry through 429s; without one, try once and fail fast to
-    # OpenAlex (the keyless pool 429s constantly and retrying just adds latency).
-    attempts = 4 if _S2_API_KEY else 1
-    data = None
-    for attempt in range(attempts):
-        # Serialise + space out calls to respect the rate limit
-        with _S2_LOCK:
-            gap = _S2_MIN_INTERVAL - (time.monotonic() - _s2_last_call)
-            if gap > 0:
-                time.sleep(gap)
-            try:
-                resp = requests.get(
-                    _S2_SEARCH_URL, params=params, headers=headers,
-                    timeout=20, proxies=_NO_PROXY,
-                )
-            finally:
-                _s2_last_call = time.monotonic()
-        if resp.status_code == 429:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        try:
-            resp.raise_for_status()
-            data = resp.json().get("data", [])
-        except Exception as exc:
-            logger.debug("[landmarks] S2 lookup failed for %r: %s", query, exc)
-            return None
-        break
+    resp = s2_client.get(_S2_SEARCH_URL, params=params)
+    if resp is None or resp.status_code != 200:
+        return None
+    try:
+        data = resp.json().get("data", [])
+    except Exception as exc:
+        logger.debug("[landmarks] S2 lookup failed for %r: %s", query, exc)
+        return None
     if not data:
         return None
 

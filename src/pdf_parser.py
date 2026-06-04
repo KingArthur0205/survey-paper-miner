@@ -261,11 +261,12 @@ def _semantic_scholar_pdf_url(doi: str | None, arxiv_id: str | None) -> str | No
     """
     Query the Semantic Scholar Graph API for an open-access PDF link.
 
-    Prefers DOI lookup; falls back to arXiv ID.  No API key required for
-    low-volume use.
-    API docs: https://api.semanticscholar.org/graph/v1
+    Prefers DOI lookup; falls back to arXiv ID.  Goes through the shared S2
+    client so it shares the global 1 req/sec rate limit with landmark
+    resolution (S2 limits requests cumulatively across all endpoints).
     """
-    _NO_PROXY = {"http": None, "https": None}
+    from . import s2_client
+
     _S2_BASE = "https://api.semanticscholar.org/graph/v1/paper"
 
     paper_id: str | None = None
@@ -277,18 +278,15 @@ def _semantic_scholar_pdf_url(doi: str | None, arxiv_id: str | None) -> str | No
     if not paper_id:
         return None
 
+    resp = s2_client.get(
+        f"{_S2_BASE}/{paper_id}",
+        params={"fields": "openAccessPdf"},
+        timeout=_HTTP_TIMEOUT_META,
+    )
+    if resp is None or resp.status_code != 200:
+        return None
     try:
-        resp = requests.get(
-            f"{_S2_BASE}/{paper_id}",
-            params={"fields": "openAccessPdf"},
-            timeout=_HTTP_TIMEOUT_META,
-            proxies=_NO_PROXY,
-        )
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        oa = data.get("openAccessPdf") or {}
+        oa = resp.json().get("openAccessPdf") or {}
         return oa.get("url") or None
     except Exception as exc:
         logger.debug("[pdf_parser] S2 lookup failed for %s: %s", paper_id, exc)
