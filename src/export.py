@@ -662,8 +662,6 @@ def _render_part1_field_architecture(
         "  - [Research Landscape](#research-landscape)",
         "  - [Research Gaps](#research-gaps)",
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
-        "  - [Survey Orientation Map](#survey-orientation-map)",
-        "  - [Coverage Matrix](#coverage-matrix)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
         "- [Part 3 — Concept Graph](#part-3--concept-graph)",
         "- [Part 4 — Paper Cards](#part-4--paper-cards)",
@@ -910,73 +908,7 @@ def _render_part2_survey_navigator(
         "",
         "## Part 2 — Survey Navigator",
         "",
-        "### Survey Orientation Map",
-        "",
     ]
-
-    # Orientation distribution
-    orientations: dict[str, list[str]] = defaultdict(list)
-    for sp, _, arch in arch_triples:
-        if not arch.analysis_failed:
-            orientations[arch.orientation or "unknown"].append(sp.paper.title)
-
-    if orientations:
-        lines.append("| Orientation | Papers |")
-        lines.append("|---|---|")
-        for orient, titles in sorted(orientations.items()):
-            paper_links = []
-            for title in titles:
-                a = _find_paper_anchor(title, arch_triples)
-                paper_links.append(f"[{_short_title(title)}](#{a})" if a else _short_title(title))
-            lines.append(f"| {orient} | {' · '.join(paper_links)} |")
-    lines.append("")
-
-    # Coverage matrix
-    lines += ["---", "", "### Coverage Matrix", ""]
-    lines.append(
-        "A checkmark means the paper has substantial coverage of that area. "
-        "Links go directly to the paper card."
-    )
-    lines.append("")
-
-    # Pick top 6 papers for the matrix columns
-    matrix_triples = [t for t in arch_triples if not t[2].analysis_failed][:6]
-    if matrix_triples:
-        # Column headers with links
-        col_headers = []
-        for sp, _, _ in matrix_triples:
-            a = _paper_anchor(sp)
-            short = _short_title(sp.paper.title)
-            year = sp.paper.year or ""
-            col_headers.append(f"[{short} {year}](#{a})")
-
-        # Rows: method families and key areas
-        areas: list[str] = (
-            list(mega.method_families.keys())[:4]
-            + list(mega.challenges.keys())[:3]
-        )
-        if not areas:
-            areas = ["Pretraining", "Alignment", "Evaluation", "Applications"]
-
-        header_row = "| |" + "|".join(f" {h} " for h in col_headers) + "|"
-        sep_row = "|---|" + "|".join(":---:" for _ in col_headers) + "|"
-        lines.append(header_row)
-        lines.append(sep_row)
-
-        for area in areas:
-            area_lower = area.lower()
-            cells = []
-            for _, _, arch in matrix_triples:
-                all_covered = (
-                    arch.covered_methods
-                    + arch.covered_tasks
-                    + arch.covered_challenges
-                    + arch.covered_applications
-                )
-                hit = any(area_lower in item.lower() for item in all_covered)
-                cells.append(" ✓ " if hit else "   ")
-            lines.append(f"| {area} |" + "|".join(cells) + "|")
-    lines.append("")
 
     # Complementary coverage from comparison
     if cmp and not cmp.comparison_failed and cmp.complementary_coverage:
@@ -1062,9 +994,9 @@ def _render_part4_paper_cards(
         # URL and back-link
         url = p.url or (f"https://arxiv.org/abs/{p.arxiv_id}" if p.arxiv_id else "")
         if url:
-            lines.append(f"[Paper URL]({url})  ·  [Back to Coverage Matrix](#coverage-matrix)")
+            lines.append(f"[Paper URL]({url})  ·  [Back to Contents](#contents)")
         else:
-            lines.append("[Back to Coverage Matrix](#coverage-matrix)")
+            lines.append("[Back to Contents](#contents)")
         lines.append("")
 
         # One-line takeaway from summary
