@@ -115,6 +115,9 @@ def _load_defaults() -> dict:
         max_results=50,
         top_n=20,
         min_score=15.0,
+        min_topic_relevance=4,
+        min_paper_tier="useful",
+        exclude_domain_specific=False,
         output_dir="data/exports",
     )
     if path.exists():
@@ -127,6 +130,9 @@ def _load_defaults() -> dict:
         d["max_results"] = raw.get("max_results_per_query",  d["max_results"])
         d["top_n"]       = raw.get("top_n_to_summarize",    d["top_n"])
         d["min_score"]   = raw.get("min_quality_score",     d["min_score"])
+        d["min_topic_relevance"]     = raw.get("min_topic_relevance",     d["min_topic_relevance"])
+        d["min_paper_tier"]          = raw.get("min_paper_tier",          d["min_paper_tier"])
+        d["exclude_domain_specific"] = raw.get("exclude_domain_specific", d["exclude_domain_specific"])
         d["output_dir"]  = raw.get("output_dir",            d["output_dir"])
     return d
 
@@ -439,7 +445,7 @@ with c6:
     min_topic_relevance = st.selectbox(
         "Min topic relevance",
         options=[1, 2, 3, 4, 5],
-        index=3,   # default = 4 (directly relevant)
+        index=max(0, min(4, int(DEFAULTS["min_topic_relevance"]) - 1)),
         format_func={
             1: "1 — off-topic (no filter)",
             2: "2 — tangential",
@@ -455,10 +461,12 @@ with c6:
 
 c7, c8 = st.columns(2)
 with c7:
+    _tier_opts = ["core", "useful", "marginal", "cut"]
+    _tier_default = str(DEFAULTS["min_paper_tier"]).lower()
     min_paper_tier = st.selectbox(
         "Min inclusion tier",
-        options=["core", "useful", "marginal", "cut"],
-        index=1,   # default = useful
+        options=_tier_opts,
+        index=_tier_opts.index(_tier_default) if _tier_default in _tier_opts else 1,
         format_func={
             "core":     "core — primary surveys only (strict)",
             "useful":   "useful — core + context (default)",
@@ -476,7 +484,7 @@ with c7:
 with c8:
     exclude_domain_specific = st.checkbox(
         "Exclude domain-specific papers",
-        value=False,
+        value=bool(DEFAULTS["exclude_domain_specific"]),
         help="Drop papers scoped to one narrow vertical (clinical, finance, agriculture, "
              "materials, software engineering…) even if they are on-topic surveys. "
              "Recommended when you want a general architecture survey rather than "
