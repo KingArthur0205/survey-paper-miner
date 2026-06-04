@@ -344,7 +344,7 @@ def _build_arch_prompt(paper: Paper, summary: PaperSummary, parsed=None) -> str:
         f"Venue: {paper.venue or 'Unknown'}",
     ]
     if paper.abstract:
-        lines.append(f"\nAbstract:\n{paper.abstract[:1500]}")
+        lines.append(f"\nAbstract:\n{paper.abstract[:4000]}")
 
     # Feed in the existing summary so the model doesn't start from scratch
     if summary.taxonomy:

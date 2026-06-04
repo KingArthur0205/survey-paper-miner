@@ -1583,32 +1583,92 @@ def _render_mermaid_png(mmd_path: Path, png_path: Path) -> None:
         logger.warning("Mermaid render error for %s: %s", mmd_path.name, exc)
 
 
+# Generic words that appear in almost every survey title and therefore carry
+# no disambiguating signal.  They are stripped before fuzzy title matching so a
+# fragment like "RAG for AIGC: A Survey" doesn't match "RAG for LLMs: A Survey"
+# purely on the shared words "for", "a", "survey".
+_TITLE_STOPWORDS = {
+    "a", "an", "the", "for", "of", "on", "in", "and", "or", "to", "with", "from",
+    "survey", "review", "systematic", "literature", "comprehensive", "overview",
+    "study", "towards", "via", "using", "based", "approach", "approaches",
+    "generation", "retrieval", "augmented", "retrievalaugmented",
+}
+
+
+# Domain acronyms expanded before matching, so a fragment that uses the acronym
+# ("RAG for AIGC") matches a title that spells it out ("…for AI-Generated Content").
+# RAG/LLM expansions land on stopwords and drop out, leaving the distinguishing
+# words (e.g. "ai generated content" vs "large language models").
+_TITLE_ACRONYMS = {
+    "aigc": "ai generated content",
+    "llms": "large language models",
+    "llm": "large language model",
+    "mllms": "multimodal large language models",
+    "mllm": "multimodal large language model",
+    "cais": "compound ai systems",
+    "rag": "retrieval augmented generation",
+    "qa": "question answering",
+    "kg": "knowledge graph",
+    "nlp": "natural language processing",
+    "mcp": "model context protocol",
+}
+
+
+def _title_signature(text: str) -> str:
+    """
+    Lowercase significant words of a title for fuzzy matching:
+    expand domain acronyms, then drop generic stopwords.
+    """
+    expanded = " ".join(
+        _TITLE_ACRONYMS.get(w, w) for w in re.findall(r"[a-z0-9]+", text.lower())
+    )
+    words = re.findall(r"[a-z0-9]+", expanded)
+    return " ".join(w for w in words if w not in _TITLE_STOPWORDS and len(w) > 1)
+
+
 def _find_paper_anchor(
     title_fragment: str,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
 ) -> str:
     """
-    Find a paper anchor by matching title_fragment against known paper titles.
-    Returns the anchor string or "" if no match found.
+    Find the anchor of the paper whose title best matches `title_fragment`.
+
+    Returns "" when there is no confident match.  Matching is done on the
+    *significant* words of the title (generic survey words removed) using
+    rapidfuzz, and a disambiguation margin is required so an ambiguous
+    fragment links to NOTHING rather than to a plausible-but-wrong paper.
     """
     if not title_fragment:
         return ""
-    frag_lower = title_fragment.lower()
-    # Try contains match first
+
+    frag_lower = title_fragment.lower().strip()
+
+    # 1. Exact / containment match on the full title (strongest signal)
     for sp, _, _ in arch_triples:
-        if frag_lower in sp.paper.title.lower() or sp.paper.title.lower() in frag_lower:
+        t = sp.paper.title.lower()
+        if frag_lower == t or (len(frag_lower) > 15 and frag_lower in t) \
+           or (len(t) > 15 and t in frag_lower):
             return _paper_anchor(sp)
-    # Fallback: word overlap
-    frag_words = set(frag_lower.split())
-    best_overlap = 0
-    best_anchor = ""
+
+    # 2. Fuzzy match on significant words, with a disambiguation margin
+    from rapidfuzz import fuzz
+    frag_sig = _title_signature(title_fragment)
+    if not frag_sig:
+        return ""
+
+    scored: list[tuple[float, str]] = []
     for sp, _, _ in arch_triples:
-        title_words = set(sp.paper.title.lower().split())
-        overlap = len(frag_words & title_words)
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best_anchor = _paper_anchor(sp)
-    return best_anchor if best_overlap >= 2 else ""
+        score = fuzz.token_set_ratio(frag_sig, _title_signature(sp.paper.title))
+        scored.append((score, _paper_anchor(sp)))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_anchor = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+
+    # Require a decent absolute score AND a clear lead over the runner-up.
+    if best_score >= 70 and (best_score - second_score) >= 15:
+        return best_anchor
+    return ""
 
 
 def _short_title(title: str, max_words: int = 5) -> str:

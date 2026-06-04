@@ -35,7 +35,7 @@ _MODEL = "claude-sonnet-4-6"
 _CACHE_DIR = "data/cache/llm/judge"
 # Bump when the judge schema or prompt changes so stale cached assessments
 # (made with an older rubric) are not reused.
-_JUDGE_SCHEMA_VERSION = "v2-tier"
+_JUDGE_SCHEMA_VERSION = "v3-fullabstract"
 
 _JUDGE_SCHEMA = """
 {
@@ -244,7 +244,11 @@ def _build_prompt(paper: Paper, summary: PaperSummary, topics: list[str]) -> str
     ]
 
     if abstract:
-        lines.append(f"\nAbstract:\n{abstract[:1200]}")
+        # Send the whole abstract (capped generously). The previous 1200-char
+        # cut left the model with a mid-sentence fragment, so it kept reporting
+        # "abstract is truncated" as a weakness even when the source abstract
+        # was complete.
+        lines.append(f"\nAbstract:\n{abstract[:4000]}")
 
     if not summary.summarization_failed:
         if summary.research_scope:
