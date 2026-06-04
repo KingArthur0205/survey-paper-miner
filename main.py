@@ -187,6 +187,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip landmark seminal primary-paper detection (ReAct/Self-RAG style)",
     )
     parser.add_argument(
+        "--no-top-surveys",
+        action="store_true",
+        help="Skip injecting the highest-cited surveys per topic into the pool",
+    )
+    parser.add_argument(
         "--arxiv",
         action="store_true",
         help=(
@@ -360,10 +365,28 @@ def _run_fetch_steps(
         "Cache stats: %d hits, %d misses, %d total entries",
         cache.stats["hits"], cache.stats["misses"], cache.stats["total_entries"],
     )
+
     logger.info("Total papers retrieved (before filtering): %d", len(all_papers))
 
     # ------------------------------------------------------------------ #
-    # 4. Three-layer relevance filter                                      #
+    # 3b. Top-cited surveys per topic (coverage guarantee)                #
+    #     Retrieved separately and merged in AFTER the crude keyword /     #
+    #     binary filters: these are already verified topic surveys (matched #
+    #     by OpenAlex title search + sorted by citations), so the literal   #
+    #     keyword filter — which would drop e.g. "Graph RAG: A Survey" for  #
+    #     an "Agentic RAG" topic because the acronym is spelled out — must  #
+    #     not discard them. The judge still rates and filters them.         #
+    # ------------------------------------------------------------------ #
+    top_surveys: list[Paper] = []
+    if cfg.top_surveys_enabled and not args.no_top_surveys:
+        from src.top_survey_retriever import retrieve_top_surveys
+        top_surveys = retrieve_top_surveys(
+            cfg.topics, cfg.year_from, cfg.year_to,
+            per_topic=cfg.top_surveys_per_topic,
+        )
+
+    # ------------------------------------------------------------------ #
+    # 4. Three-layer relevance filter (on query-retrieved papers only)     #
     # ------------------------------------------------------------------ #
     all_papers = filter_all_topics(all_papers, min_fraction=0.5)
     all_papers = filter_survey_signal(all_papers)
@@ -381,6 +404,16 @@ def _run_fetch_steps(
     if not args.no_llm_filter:
         unique_papers = llm_filter_papers(unique_papers, cfg)
         logger.info("Papers after LLM relevance filter: %d", len(unique_papers))
+
+    # Merge the curated top-cited surveys now (they bypass the crude keyword
+    # and binary LLM filters), then re-dedup against the surviving pool.
+    if top_surveys:
+        before = len(unique_papers)
+        unique_papers = deduplicate(unique_papers + top_surveys)
+        logger.info(
+            "Merged %d top-cited surveys → %d unique papers (was %d).",
+            len(top_surveys), len(unique_papers), before,
+        )
 
     # ------------------------------------------------------------------ #
     # 5c. Canonical Survey Detector                                        #

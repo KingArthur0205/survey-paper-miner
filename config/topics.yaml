@@ -28,6 +28,14 @@ exclude_domain_specific: true
 # Landmark seminal primary papers (ReAct/Self-RAG style). The survey-only pipeline
 # normally hides primary papers; this surfaces the foundational ones the surveys
 # repeatedly build on, so a newcomer can read the original techniques.
+# Inject the highest-cited surveys matching each topic (via OpenAlex title
+# search) so popular surveys aren't missed just because the LLM phrased its
+# queries differently. They bypass the crude keyword filter but still face the
+# judge — so to actually see broader/adjacent popular surveys, keep
+# min_paper_tier at "useful" and min_topic_relevance at 3.
+top_surveys_enabled: true
+top_surveys_per_topic: 12
+
 landmarks_enabled: true
 landmark_min_mentions: 2      # must be referenced by >= this many surveys
 # Resolution prefers Semantic Scholar, whose citation counts are accurate, so a

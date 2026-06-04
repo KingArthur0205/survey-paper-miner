@@ -73,6 +73,13 @@ class AppConfig:
     # surfaces them.  When enabled, an LLM extracts the works the surveys most
     # repeatedly build on, resolves them against OpenAlex, and keeps only those
     # that are genuinely high-impact.
+    # Inject the highest-cited surveys matching each topic into the candidate
+    # pool (via OpenAlex title search), so popular surveys are never missed just
+    # because the LLM phrased its queries differently. They still pass the normal
+    # relevance/judge filters.
+    top_surveys_enabled: bool = True
+    top_surveys_per_topic: int = 12
+
     landmarks_enabled: bool = True
     landmark_min_mentions: int = 2     # must be referenced by >= this many surveys
     # Resolution prefers Semantic Scholar (accurate citation counts), so a real
@@ -146,6 +153,8 @@ def load_config(
         min_topic_relevance=raw.get("min_topic_relevance", 3),
         min_paper_tier=raw.get("min_paper_tier", "useful"),
         exclude_domain_specific=raw.get("exclude_domain_specific", False),
+        top_surveys_enabled=raw.get("top_surveys_enabled", True),
+        top_surveys_per_topic=raw.get("top_surveys_per_topic", 12),
         landmarks_enabled=raw.get("landmarks_enabled", True),
         landmark_min_mentions=raw.get("landmark_min_mentions", 2),
         landmark_min_citations=raw.get("landmark_min_citations", 100),
