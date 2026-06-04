@@ -84,6 +84,7 @@ def retrieve_top_surveys(
                 paper = _parse_item(item, topic, f"top-cited-survey: {query}")
                 if not paper:
                     continue
+                paper.from_top_survey = True
                 seen.add(key)
                 out.append(paper)
                 kept_for_topic += 1

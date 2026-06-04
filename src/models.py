@@ -35,6 +35,12 @@ class Paper(BaseModel):
     # Set by TemporalStratifier: "foundational" | "current_standard" | "emerging" | None
     authority_tier: Optional[str] = None
 
+    # True when injected by the top-cited-survey retriever. These curated,
+    # citation-ranked surveys bypass the score-based filters (keyword / min-score)
+    # and are guaranteed a summarise+judge slot, so popular surveys aren't cut by
+    # raw citation score before the judge can assess their relevance.
+    from_top_survey: bool = False
+
     # Provenance: which retriever(s) returned this paper
     sources: list[str] = Field(default_factory=list)
     # Which user-facing topic generated the query that found this paper

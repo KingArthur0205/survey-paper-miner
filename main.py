@@ -284,6 +284,34 @@ def run_analyze(args: argparse.Namespace) -> None:
 # Shared step functions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _prioritise_top_surveys(
+    scored_papers: list[ScoredPaper],
+    top_n: int,
+) -> list[ScoredPaper]:
+    """
+    Reorder so curated top-cited surveys come first, guaranteeing they fall
+    within the top-N summarise window even if their citation score is low.
+
+    Does not mutate the input list; the global `scored_papers` ranking (used
+    for export) is left untouched.
+    """
+    injected = [sp for sp in scored_papers if sp.paper.from_top_survey]
+    if not injected:
+        return scored_papers
+    others = [sp for sp in scored_papers if not sp.paper.from_top_survey]
+    if len(injected) > top_n:
+        logger.warning(
+            "%d curated top-surveys exceed top_n=%d — some won't be analysed. "
+            "Raise top_n_to_summarize to cover them all.",
+            len(injected), top_n,
+        )
+    logger.info(
+        "Prioritising %d curated top-survey(s) into the summarise window.",
+        len(injected),
+    )
+    return injected + others
+
+
 def _load_cfg(args: argparse.Namespace) -> AppConfig:
     overrides: dict = {}
     if args.output_dir:
@@ -425,7 +453,26 @@ def _run_fetch_steps(
     # 6. Score and rank                                                    #
     # ------------------------------------------------------------------ #
     scored_papers = score_papers(unique_papers, cfg)
-    scored_papers = filter_min_score(scored_papers, min_score=cfg.min_quality_score)
+
+    # Min-score gate — but curated top-cited surveys are exempt. They are
+    # citation-ranked popular surveys that may be brand-new (few citations →
+    # low score); cutting them here would defeat the injection. Let the judge
+    # decide their fate instead.
+    before_ms = len(scored_papers)
+    kept = filter_min_score(scored_papers, min_score=cfg.min_quality_score)
+    kept_titles = {sp.paper.title for sp in kept}
+    rescued = [
+        sp for sp in scored_papers
+        if sp.paper.from_top_survey and sp.paper.title not in kept_titles
+    ]
+    if rescued:
+        kept.extend(rescued)
+        kept.sort(key=lambda sp: sp.quality_score, reverse=True)
+        logger.info(
+            "Min-score filter (>= %.0f): kept %d / %d (+%d curated top-surveys exempt)",
+            cfg.min_quality_score, len(kept) - len(rescued), before_ms, len(rescued),
+        )
+    scored_papers = kept
 
     logger.info(
         "Top paper: '%s' (score=%.1f)",
@@ -463,8 +510,13 @@ def _run_analyze_steps(
                 "Summarising top %d papers with %s …",
                 cfg.top_n_to_summarize, "claude-sonnet-4-6",
             )
+            # Guarantee curated top-cited surveys a slot in the summarise/judge
+            # window: place them first so they aren't pushed out of the top-N by
+            # higher-scored (often tangential, more-cited) papers. The judge
+            # re-ranks everything afterwards, so final report order is unaffected.
+            summarize_input = _prioritise_top_surveys(scored_papers, cfg.top_n_to_summarize)
             summarizer = LLMSummarizer(cfg)
-            summary_pairs = summarizer.summarize_top_n(scored_papers, cfg.top_n_to_summarize)
+            summary_pairs = summarizer.summarize_top_n(summarize_input, cfg.top_n_to_summarize)
             failed = sum(1 for _, s in summary_pairs if s.summarization_failed)
             logger.info(
                 "Summarisation complete: %d succeeded, %d failed",

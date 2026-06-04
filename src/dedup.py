@@ -140,6 +140,8 @@ def _merge(base: Paper, duplicate: Paper) -> Paper:
             base.influential_citation_count,
             duplicate.influential_citation_count,
         ),
+        # If either copy is a curated top-survey, the merged record is too.
+        from_top_survey=base.from_top_survey or duplicate.from_top_survey,
         sources=_union(base.sources, duplicate.sources),
         topic_queries=_union(base.topic_queries, duplicate.topic_queries),
         generated_queries=_union(base.generated_queries, duplicate.generated_queries),
