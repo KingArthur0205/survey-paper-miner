@@ -25,6 +25,10 @@ from __future__ import annotations
 import json
 import logging
 
+import os
+import threading
+import time
+
 import anthropic
 import requests
 
@@ -37,6 +41,16 @@ logger = logging.getLogger(__name__)
 _MODEL = "claude-sonnet-4-6"
 _CACHE_DIR = "data/cache/llm/landmarks"
 _OPENALEX_URL = "https://api.openalex.org/works"
+_S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+# Optional free key (https://www.semanticscholar.org/product/api) raises the
+# rate limit substantially. Read from either common env-var name.
+_S2_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or os.environ.get("S2_API_KEY") or ""
+
+# Serialise Semantic Scholar calls with a minimum gap — the keyless pool is
+# ~1 req/s and bursts get 429'd.
+_S2_LOCK = threading.Lock()
+_S2_MIN_INTERVAL = 1.2 if not _S2_API_KEY else 0.4
+_s2_last_call: float = 0.0
 _MAILTO = "survey-miner@example.com"
 _NO_PROXY = {"http": None, "https": None}
 
@@ -98,7 +112,20 @@ class LandmarkDetector:
             len(candidates), min_mentions, topic,
         )
 
-        # Resolve each against OpenAlex and keep the high-impact ones
+        # Citation floor: Semantic Scholar gives accurate counts, but the
+        # keyless pool is rate-limited so we fall back to OpenAlex, which
+        # severely undercounts seminal papers. Without an S2 key, cap the floor
+        # low so genuine landmarks (resolved via OpenAlex) aren't filtered out.
+        floor = self._cfg.landmark_min_citations
+        if not _S2_API_KEY:
+            floor = min(floor, 15)
+            logger.info(
+                "[landmarks] no SEMANTIC_SCHOLAR_API_KEY — using OpenAlex counts; "
+                "citation floor capped at %d. Set the key for accurate counts.",
+                floor,
+            )
+
+        # Resolve each (Semantic Scholar → OpenAlex) and keep high-impact ones
         landmarks: list[LandmarkPaper] = []
         seen_titles: set[str] = set()
         for c in candidates:
@@ -106,14 +133,14 @@ class LandmarkDetector:
             query = str(c.get("full_title") or name).strip()
             if not query:
                 continue
-            meta = _openalex_lookup(query)
+            meta = _resolve_paper(query)
             if not meta:
-                logger.debug("[landmarks] no OpenAlex match for %r", query)
+                logger.debug("[landmarks] no match for %r", query)
                 continue
-            if meta["citation_count"] < self._cfg.landmark_min_citations:
+            if meta["citation_count"] < floor:
                 logger.debug(
                     "[landmarks] dropping %r — only %d citations (< %d)",
-                    meta["title"][:60], meta["citation_count"], self._cfg.landmark_min_citations,
+                    meta["title"][:60], meta["citation_count"], floor,
                 )
                 continue
             tkey = meta["title"].lower()
@@ -198,20 +225,120 @@ def _build_prompt(
     )
 
 
-def _openalex_lookup(query: str) -> dict | None:
+def _resolve_paper(query: str) -> dict | None:
     """
-    Resolve a paper name/title to OpenAlex metadata.
+    Resolve a paper name/title to metadata, trying Semantic Scholar first
+    (best coverage of ML preprints AND accurate citation counts) and falling
+    back to OpenAlex.  Returns {title, year, citation_count, url} or None.
+    """
+    return _semantic_scholar_lookup(query) or _openalex_lookup(query)
 
-    Returns the result whose TITLE best matches the query (by fuzzy token
-    similarity), provided it clears a strict threshold — otherwise None.
-    Citation count is used only as a tie-breaker, never as the selector, so
-    a famous-but-different paper can't hijack the match.
+
+def _pick_best(query: str, candidates: list[dict]) -> dict | None:
+    """
+    Choose the candidate whose title best matches `query`.
+
+    Each candidate is {title, cites, year, url}.  We require the title to
+    contain the query's words (token_set_ratio >= 85), then among the closest
+    full-title matches (within 5 pts of the best token_sort_ratio) pick the
+    MOST-CITED — selecting the canonical record over duplicates while rejecting
+    superset titles (e.g. "RocketQA … Dense Passage Retrieval" vs the real DPR).
     """
     from rapidfuzz import fuzz
 
-    # title.search matches the TITLE specifically. Plain `search` does full-text
-    # matching and floods results with unrelated high-citation papers (e.g. deep
-    # learning reviews), which then hijack the citation tie-break.
+    q_norm = _norm(query)
+    scored = []
+    for c in candidates:
+        title = (c.get("title") or "").strip()
+        if not title:
+            continue
+        scored.append({
+            "set": fuzz.token_set_ratio(q_norm, _norm(title)),
+            "sort": fuzz.token_sort_ratio(q_norm, _norm(title)),
+            "cites": c.get("cites", 0) or 0,
+            "item": c,
+        })
+
+    matches = [s for s in scored if s["set"] >= 85]
+    if not matches:
+        return None
+    top_sort = max(s["sort"] for s in matches)
+    if top_sort < 70:
+        return None
+    near = [s for s in matches if s["sort"] >= top_sort - 5]
+    return max(near, key=lambda s: s["cites"])["item"]
+
+
+def _semantic_scholar_lookup(query: str) -> dict | None:
+    """Resolve via the Semantic Scholar search API (rate-limited, retried)."""
+    global _s2_last_call
+    headers = {"x-api-key": _S2_API_KEY} if _S2_API_KEY else {}
+    params = {
+        "query": query,
+        "limit": 6,
+        "fields": "title,year,citationCount,externalIds,url",
+    }
+
+    # With a key, retry through 429s; without one, try once and fail fast to
+    # OpenAlex (the keyless pool 429s constantly and retrying just adds latency).
+    attempts = 4 if _S2_API_KEY else 1
+    data = None
+    for attempt in range(attempts):
+        # Serialise + space out calls to respect the rate limit
+        with _S2_LOCK:
+            gap = _S2_MIN_INTERVAL - (time.monotonic() - _s2_last_call)
+            if gap > 0:
+                time.sleep(gap)
+            try:
+                resp = requests.get(
+                    _S2_SEARCH_URL, params=params, headers=headers,
+                    timeout=20, proxies=_NO_PROXY,
+                )
+            finally:
+                _s2_last_call = time.monotonic()
+        if resp.status_code == 429:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        try:
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+        except Exception as exc:
+            logger.debug("[landmarks] S2 lookup failed for %r: %s", query, exc)
+            return None
+        break
+    if not data:
+        return None
+
+    candidates = []
+    for d in data:
+        ext = d.get("externalIds") or {}
+        doi = ext.get("DOI")
+        arxiv = ext.get("ArXiv")
+        url = (
+            f"https://doi.org/{doi}" if doi
+            else f"https://arxiv.org/abs/{arxiv}" if arxiv
+            else d.get("url") or ""
+        )
+        candidates.append({
+            "title": d.get("title") or "",
+            "cites": d.get("citationCount") or 0,
+            "year": d.get("year"),
+            "url": url,
+        })
+
+    best = _pick_best(query, candidates)
+    if not best:
+        return None
+    return {
+        "title": best["title"].strip(),
+        "year": best.get("year"),
+        "citation_count": best.get("cites", 0),
+        "url": best.get("url", ""),
+    }
+
+
+def _openalex_lookup(query: str) -> dict | None:
+    """Resolve via OpenAlex title search (fallback when S2 misses)."""
     params = {
         "filter": f"title.search:{query}",
         "per-page": 25,
@@ -226,51 +353,25 @@ def _openalex_lookup(query: str) -> dict | None:
         logger.debug("[landmarks] OpenAlex lookup failed for %r: %s", query, exc)
         return None
 
-    if not results:
-        return None
-
-    q_norm = _norm(query)
-    scored = []
+    candidates = []
     for r in results:
-        title = (r.get("title") or "").strip()
-        if not title:
-            continue
-        # set_ratio: does the title contain the query's words? (catches the
-        #   right paper but also longer supersets like "RocketQA … DPR …")
-        # sort_ratio: full-title closeness (penalises those supersets)
-        set_r = fuzz.token_set_ratio(q_norm, _norm(title))
-        sort_r = fuzz.token_sort_ratio(q_norm, _norm(title))
-        scored.append({"set": set_r, "sort": sort_r,
-                       "cites": r.get("cited_by_count", 0) or 0, "item": r})
+        oa_id = r.get("id") or ""
+        doi = (r.get("doi") or "").strip()
+        candidates.append({
+            "title": r.get("title") or "",
+            "cites": r.get("cited_by_count", 0) or 0,
+            "year": r.get("publication_year"),
+            "url": doi or oa_id,
+        })
 
-    # Keep titles that genuinely contain the query words
-    matches = [s for s in scored if s["set"] >= 85]
-    if not matches:
-        logger.debug("[landmarks] no OpenAlex title match for %r — skipping", query)
+    best = _pick_best(query, candidates)
+    if not best:
         return None
-
-    # Among them, take the closest full-title matches (within 5 pts of the best
-    # sort_ratio), then pick the MOST-CITED — this selects the canonical record
-    # over low-citation duplicate/preprint records of the same paper while
-    # rejecting superset titles (which have a clearly lower sort_ratio).
-    top_sort = max(s["sort"] for s in matches)
-    if top_sort < 70:
-        logger.debug(
-            "[landmarks] best OpenAlex title match for %r only scored %.0f — skipping",
-            query, top_sort,
-        )
-        return None
-    near = [s for s in matches if s["sort"] >= top_sort - 5]
-    best = max(near, key=lambda s: s["cites"])["item"]
-
-    oa_id = best.get("id") or ""
-    doi = (best.get("doi") or "").strip()
-    url = doi or oa_id
     return {
-        "title": (best.get("title") or "").strip(),
-        "year": best.get("publication_year"),
-        "citation_count": best.get("cited_by_count") or 0,
-        "url": url,
+        "title": best["title"].strip(),
+        "year": best.get("year"),
+        "citation_count": best.get("cites", 0),
+        "url": best.get("url", ""),
     }
 
 
