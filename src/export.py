@@ -773,6 +773,65 @@ def _render_part1_field_architecture(
     return lines
 
 
+# Generic words ignored when matching a research-area name to papers.
+_AREA_STOPWORDS = {
+    "and", "or", "the", "a", "an", "of", "for", "in", "on", "to", "with",
+    "based", "using", "systems", "system", "general", "other", "via",
+    "approaches", "approach", "methods", "method",
+}
+
+
+def _area_tokens(name: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", name.lower())
+        if w not in _AREA_STOPWORDS and len(w) > 2
+    }
+
+
+def _papers_for_area(
+    area_name: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+    max_papers: int = 6,
+) -> list[str]:
+    """
+    Return Markdown links to the papers most relevant to a research area.
+
+    Robustly matches by word overlap between the area name and the UNION of
+    each paper's covered tasks/applications/challenges, its taxonomy, and its
+    summary taxonomy — so an area gets its key papers even when the exact
+    phrasing differs (the old strict substring match left many areas empty).
+    Ranked by overlap strength, then citation count.
+    """
+    tokens = _area_tokens(area_name)
+    if not tokens:
+        return []
+
+    scored: list[tuple[int, int, ScoredPaper]] = []
+    for sp, summary, arch in arch_triples:
+        if arch.analysis_failed:
+            continue
+        haystack_parts = (
+            list(arch.covered_tasks)
+            + list(arch.covered_applications)
+            + list(arch.covered_challenges)
+            + list(arch.top_level_taxonomy)
+        )
+        if summary and not summary.summarization_failed:
+            haystack_parts += list(summary.taxonomy)
+        hay_tokens = set(re.findall(r"[a-z0-9]+", " ".join(haystack_parts).lower()))
+        overlap = len(tokens & hay_tokens)
+        if overlap >= 1:
+            scored.append((overlap, sp.paper.citation_count, sp))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    links: list[str] = []
+    for _, _, sp in scored[:max_papers]:
+        a = _paper_anchor(sp)
+        cit = f" ({sp.paper.citation_count:,}✱)" if sp.paper.citation_count else ""
+        links.append(f"[{_short_title(sp.paper.title)}](#{a}){cit}")
+    return links
+
+
 def _render_research_landscape(
     mega: FieldMegaArchitecture,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
@@ -810,19 +869,12 @@ def _render_research_landscape(
             coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
             warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
 
-            # Papers that cover this task (match against arch.covered_tasks)
-            task_lower = task_name.lower()
-            paper_links = []
-            for sp, _, arch in arch_triples:
-                if arch.analysis_failed:
-                    continue
-                if any(task_lower in t.lower() or t.lower() in task_lower
-                       for t in arch.covered_tasks):
-                    a = _paper_anchor(sp)
-                    cit = f" ({sp.paper.citation_count:,}✱)" if sp.paper.citation_count else ""
-                    paper_links.append(f"[{_short_title(sp.paper.title)}](#{a}){cit}")
-
-            papers_str = " · ".join(paper_links[:5]) if paper_links else "—"
+            # Papers covering this area — robust word-overlap match across all
+            # of each paper's covered fields + taxonomy (not just covered_tasks),
+            # so areas no longer come up empty just because of phrasing.
+            paper_links = _papers_for_area(task_name, arch_triples, max_papers=6)
+            # One paper per line inside the cell (<br> renders as a line break)
+            papers_str = "<br>".join(paper_links) if paper_links else "—"
             safe_desc = desc.replace("|", "\\|")
             lines.append(f"| **{task_name}{warn}** | {safe_desc} | {coverage} | {papers_str} |")
         lines.append("")
