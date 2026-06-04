@@ -35,6 +35,7 @@ from .models import (
     FieldGuide,
     FieldMegaArchitecture,
     JudgeResult,
+    LandmarkPaper,
     Paper,
     PaperArchitecture,
     PaperSummary,
@@ -290,6 +291,7 @@ class Exporter:
         judge_map: dict[str, JudgeResult] | None = None,
         reading_path: "ReadingPath | None" = None,
         concept_graph: "ConceptGraph | None" = None,
+        landmarks: "list[LandmarkPaper] | None" = None,
     ) -> Path:
         """
         Write the full architecture report for one topic to its sub-folder.
@@ -307,6 +309,8 @@ class Exporter:
         lines: list[str] = []
         lines += _render_part1_field_architecture(topic, mega, arch_triples)
         lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
+        if landmarks:
+            lines += _render_landmark_papers(landmarks)
         if concept_graph and not concept_graph.extraction_failed:
             lines += _render_part3_concept_graph(concept_graph)
         lines += _render_part4_paper_cards(arch_triples, judge_map)
@@ -663,6 +667,7 @@ def _render_part1_field_architecture(
         "  - [Research Gaps](#research-gaps)",
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
+        "- [Landmark Papers](#landmark-papers)",
         "- [Part 3 — Concept Graph](#part-3--concept-graph)",
         "  - [Concepts](#concepts)",
         "  - [Concept Map](#concept-map)",
@@ -1125,6 +1130,40 @@ _EDGE_ORDER = [
     "is_subfield_of", "part_of", "uses", "applied_to",
     "evaluated_by", "contrasts_with", "emerged_after",
 ]
+
+
+def _render_landmark_papers(landmarks: list["LandmarkPaper"]) -> list[str]:
+    """
+    Render the Landmark Papers section: the seminal *primary* works (not
+    surveys) that the analysed surveys repeatedly build on.
+    """
+    lines: list[str] = [
+        "---",
+        "",
+        "## Landmark Papers",
+        "",
+        "*Seminal primary papers (not surveys) that the analysed surveys most often "
+        "build upon — read these for the original techniques.*",
+        "",
+        "| Paper | Year | Citations | Referenced by | Why it matters |",
+        "|---|---|---:|---:|---|",
+    ]
+    for lm in landmarks:
+        name = (lm.name or "").strip()
+        short = _short_title(lm.title, 9) if lm.title else name
+        # Avoid "Self-RAG — Self-RAG: ..." redundancy when the name is in the title
+        if name and lm.title and name.lower() not in lm.title.lower():
+            title_disp = f"{name} — {short}"
+        else:
+            title_disp = short or name
+        link = f"[{title_disp}]({lm.url})" if lm.url else title_disp
+        year = lm.year or "—"
+        cites = f"{lm.citation_count:,}" if lm.citation_count else "—"
+        ref = f"{lm.mentioned_by} surveys" if lm.mentioned_by else "—"
+        why = (lm.why_seminal or "").replace("|", "\\|")
+        lines.append(f"| {link} | {year} | {cites} | {ref} | {why} |")
+    lines.append("")
+    return lines
 
 
 def _render_part3_concept_graph(graph: "ConceptGraph") -> list[str]:

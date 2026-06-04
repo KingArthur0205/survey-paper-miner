@@ -274,6 +274,25 @@ class ConceptGraph(BaseModel):
     failure_reason: str = ""
 
 
+class LandmarkPaper(BaseModel):
+    """
+    A seminal *primary* paper (not a survey) that the analysed surveys
+    repeatedly build on — e.g. ReAct or Self-RAG for Agentic RAG.
+
+    Detected from the survey material, then resolved against OpenAlex and
+    kept only if it is genuinely high-impact.  Surfaced so a newcomer can
+    read the actual landmark techniques the surveys describe.
+    """
+
+    name: str                       # short name, e.g. "Self-RAG"
+    title: str = ""                 # resolved full paper title
+    year: Optional[int] = None
+    citation_count: int = 0
+    url: str = ""
+    mentioned_by: int = 0           # how many analysed surveys reference it
+    why_seminal: str = ""           # one sentence on its foundational role
+
+
 class ReadingStep(BaseModel):
     """One paper in a curated reading path."""
 

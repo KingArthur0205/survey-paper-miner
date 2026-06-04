@@ -182,6 +182,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip reading path generation",
     )
     parser.add_argument(
+        "--no-landmarks",
+        action="store_true",
+        help="Skip landmark seminal primary-paper detection (ReAct/Self-RAG style)",
+    )
+    parser.add_argument(
         "--arxiv",
         action="store_true",
         help=(
@@ -635,10 +640,17 @@ def _run_analyze_steps(
             logger.info("Skipping architecture analysis (--no-architecture).")
 
     # ------------------------------------------------------------------ #
-    # 9. Concept graph + reading path + field guide (per topic)           #
+    # 9. Concept graph + reading path + landmarks (per topic)             #
     # ------------------------------------------------------------------ #
     concept_graphs: dict[str, object] = {}
     reading_paths: dict[str, object] = {}
+    landmarks_by_topic: dict[str, list] = {}
+
+    # Landmark detection works off the per-topic summary pairs
+    summaries_by_topic: dict[str, list] = defaultdict(list)
+    for sp, s in summary_pairs:
+        tkey = sp.paper.topic_queries[0] if sp.paper.topic_queries else "Uncategorised"
+        summaries_by_topic[tkey].append((sp, s))
 
     for topic_key, (triples, mega) in arch_triples_by_topic.items():
         # Build judge_triples for this topic (needed by reading path)
@@ -669,6 +681,22 @@ def _run_analyze_steps(
             except Exception as exc:
                 logger.warning("[reading_path] Failed for '%s': %s", topic_key, exc)
 
+        # 9c. Landmark seminal primary papers (ReAct/Self-RAG style)
+        if (
+            not args.no_landmarks
+            and cfg.landmarks_enabled
+            and cfg.anthropic_api_key
+        ):
+            try:
+                from src.landmark_detector import LandmarkDetector
+                detector = LandmarkDetector(cfg)
+                topic_summaries = summaries_by_topic.get(topic_key, [])
+                lms = detector.detect(topic_key, topic_summaries)
+                if lms:
+                    landmarks_by_topic[topic_key] = lms
+            except Exception as exc:
+                logger.warning("[landmarks] Failed for '%s': %s", topic_key, exc)
+
     # ------------------------------------------------------------------ #
     # 10. Persist to SQLite                                                #
     # ------------------------------------------------------------------ #
@@ -691,12 +719,14 @@ def _run_analyze_steps(
     for topic_key, (triples, mega) in arch_triples_by_topic.items():
         rp = reading_paths.get(topic_key)
         cg = concept_graphs.get(topic_key)
+        lms = landmarks_by_topic.get(topic_key)
 
         rpt = exporter.export_architecture_report(
             topic_key, triples, mega,
             judge_map=judge_map or None,
             reading_path=rp,
             concept_graph=cg,
+            landmarks=lms,
         )
         arch_report_paths.append(rpt)
 
@@ -737,6 +767,9 @@ def _run_analyze_steps(
         print(f"  Concept graphs:    {len(concept_graphs)}")
     if reading_paths:
         print(f"  Reading paths:     {len(reading_paths)}")
+    if landmarks_by_topic:
+        total_lms = sum(len(v) for v in landmarks_by_topic.values())
+        print(f"  Landmark papers:   {total_lms}")
     print(f"\nOutputs saved to: {run_dir}")
     print(f"  XLSX   → {xlsx_path.name}")
     for p in arch_report_paths:

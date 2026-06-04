@@ -68,6 +68,16 @@ class AppConfig:
     # on-topic surveys.  Independent of min_paper_tier.
     exclude_domain_specific: bool = False
 
+    # Landmark (seminal primary-paper) detection.  Surveys describe foundational
+    # primary works (e.g. ReAct, Self-RAG) but the survey-only pipeline never
+    # surfaces them.  When enabled, an LLM extracts the works the surveys most
+    # repeatedly build on, resolves them against OpenAlex, and keeps only those
+    # that are genuinely high-impact.
+    landmarks_enabled: bool = True
+    landmark_min_mentions: int = 2     # must be referenced by >= this many surveys
+    landmark_min_citations: int = 100  # must have >= this many citations (high-impact)
+    landmark_max_count: int = 8        # cap the number surfaced
+
     # Research-gap detection thresholds
     gap_min_surveys: int = 3         # min surveys that must mention a gap
     gap_frequency_threshold: float = 0.3  # fraction of surveys for "frequency" gap
@@ -133,6 +143,10 @@ def load_config(
         min_topic_relevance=raw.get("min_topic_relevance", 3),
         min_paper_tier=raw.get("min_paper_tier", "useful"),
         exclude_domain_specific=raw.get("exclude_domain_specific", False),
+        landmarks_enabled=raw.get("landmarks_enabled", True),
+        landmark_min_mentions=raw.get("landmark_min_mentions", 2),
+        landmark_min_citations=raw.get("landmark_min_citations", 100),
+        landmark_max_count=raw.get("landmark_max_count", 8),
         gap_min_surveys=llm_raw.get("gap_min_surveys", 3),
         gap_frequency_threshold=llm_raw.get("gap_frequency_threshold", 0.3),
     )
