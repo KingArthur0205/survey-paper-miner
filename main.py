@@ -682,18 +682,10 @@ def _run_analyze_steps(
     # ------------------------------------------------------------------ #
     # 11. Export                                                           #
     # ------------------------------------------------------------------ #
-    arch_map = {}
-    for _, (triples, _) in arch_triples_by_topic.items():
-        for sp, _, arch in triples:
-            arch_map[sp.paper.title] = arch
-
     run_dir = make_run_dir(cfg.topics, cfg.output_dir)
     exporter = Exporter(run_dir)
 
-    xlsx_path = exporter.export_xlsx(scored_papers, summary_pairs)
-    csv_path = exporter.export_csv(scored_papers, judge_map=judge_map or None, arch_map=arch_map or None)
     jsonl_path = exporter.export_jsonl(summary_pairs, judge_map=judge_map or None) if summary_pairs else None
-    md_path = exporter.export_markdown(scored_papers, summary_pairs)
 
     arch_report_paths = []
     for topic_key, (triples, mega) in arch_triples_by_topic.items():
@@ -746,11 +738,8 @@ def _run_analyze_steps(
     if reading_paths:
         print(f"  Reading paths:     {len(reading_paths)}")
     print(f"\nOutputs saved to: {run_dir}")
-    print(f"  XLSX   → {xlsx_path.name}")
-    print(f"  CSV    → {csv_path.name}")
     if jsonl_path:
         print(f"  JSONL  → {jsonl_path.name}")
-    print(f"  Report → {md_path.name}")
     for p in arch_report_paths:
         print(f"  Arch   → {p.name}")
     print("─" * 60 + "\n")
