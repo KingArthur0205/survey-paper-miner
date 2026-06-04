@@ -664,6 +664,9 @@ def _render_part1_field_architecture(
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
         "- [Part 3 — Concept Graph](#part-3--concept-graph)",
+        "  - [Concepts](#concepts)",
+        "  - [Concept Map](#concept-map)",
+        "  - [How Concepts Relate](#how-concepts-relate)",
         "- [Part 4 — Paper Cards](#part-4--paper-cards)",
         "",
         "---",
@@ -1085,8 +1088,54 @@ def _render_part0_field_guide(topic: str, guide: "FieldGuide") -> list[str]:
     return lines
 
 
+# Plain-English metadata for each relationship type.
+# (display order, readable verb for the diagram, sentence template, what it means)
+_EDGE_META: dict[str, dict] = {
+    "is_subfield_of": {
+        "label": "is a subfield of",
+        "heading": "Hierarchy — subfields",
+        "explains": "The first concept is a more specialised area within the second.",
+    },
+    "part_of": {
+        "label": "is part of",
+        "heading": "Composition — components",
+        "explains": "The first concept is a component or building block of the second.",
+    },
+    "uses": {
+        "label": "uses",
+        "heading": "Dependencies — what builds on what",
+        "explains": "The first concept relies on or is built using the second.",
+    },
+    "applied_to": {
+        "label": "is applied to",
+        "heading": "Applications — method → task",
+        "explains": "The first concept (a method) is used to tackle the second (a task or domain).",
+    },
+    "evaluated_by": {
+        "label": "is evaluated by",
+        "heading": "Evaluation — benchmarks & metrics",
+        "explains": "The first concept is measured using the second (a benchmark or metric).",
+    },
+    "contrasts_with": {
+        "label": "contrasts with",
+        "heading": "Contrasts — competing approaches",
+        "explains": "The two concepts are alternatives or stand in tension with each other.",
+    },
+    "emerged_after": {
+        "label": "emerged after",
+        "heading": "Timeline — what came later",
+        "explains": "The first concept developed later than the second.",
+    },
+}
+# Order relationship groups are presented in.
+_EDGE_ORDER = [
+    "is_subfield_of", "part_of", "uses", "applied_to",
+    "evaluated_by", "contrasts_with", "emerged_after",
+]
+
+
 def _render_part3_concept_graph(graph: "ConceptGraph") -> list[str]:
-    """Render Part 3 — Concept Graph as a node/edge listing."""
+    """Render Part 3 — Concept Graph: concepts table + map + readable relationships."""
     lines: list[str] = [
         "---",
         "",
@@ -1096,38 +1145,110 @@ def _render_part3_concept_graph(graph: "ConceptGraph") -> list[str]:
         "",
     ]
 
-    # Nodes table
+    node_name_map = {n.node_id: n.name for n in graph.nodes}
+
+    # ── Concepts table (Name + Definition only) ──────────────────────────
     if graph.nodes:
         lines += ["### Concepts", ""]
-        lines.append("| ID | Name | Definition |")
-        lines.append("|---|---|---|")
+        lines.append("| Name | Definition |")
+        lines.append("|---|---|")
         for node in graph.nodes:
-            safe_def = node.definition.replace("|", "\\|")
-            lines.append(f"| `{node.node_id}` | **{node.name}** | {safe_def} |")
+            safe_def = (node.definition or "").replace("|", "\\|")
+            lines.append(f"| **{node.name}** | {safe_def} |")
         lines.append("")
 
-    # Edges grouped by type
+    # ── Concept map (visual overview) ─────────────────────────────────────
     if graph.edges:
-        lines += ["### Relationships", ""]
+        lines += ["### Concept Map", ""]
+        lines.append(
+            "Arrows are labelled with the relationship type. "
+            "See *How concepts relate* below for the full list with evidence."
+        )
+        lines.append("")
+        lines += _concept_graph_mermaid(graph, node_name_map)
+        lines.append("")
+
+    # ── Readable, grouped relationship list ───────────────────────────────
+    if graph.edges:
+        lines += ["### How concepts relate", ""]
+
         from collections import defaultdict as _dd
         by_type: dict[str, list] = _dd(list)
-        node_name_map = {n.node_id: n.name for n in graph.nodes}
         for edge in graph.edges:
             by_type[edge.edge_type].append(edge)
 
-        for etype, edges in sorted(by_type.items()):
-            lines.append(f"**{etype.replace('_', ' ').title()}**")
+        # Known types first (in defined order), then any unexpected types
+        ordered_types = [t for t in _EDGE_ORDER if t in by_type]
+        ordered_types += [t for t in sorted(by_type) if t not in _EDGE_META]
+
+        for etype in ordered_types:
+            edges = by_type[etype]
+            meta = _EDGE_META.get(etype, {
+                "label": etype.replace("_", " "),
+                "heading": etype.replace("_", " ").title(),
+                "explains": "",
+            })
+            lines.append(f"#### {meta['heading']}")
+            if meta["explains"]:
+                lines.append(f"*{meta['explains']}*")
             lines.append("")
-            lines.append("| Source | Target | Evidence |")
-            lines.append("|---|---|---|")
             for e in edges:
-                src_name = node_name_map.get(e.source_id, e.source_id)
-                tgt_name = node_name_map.get(e.target_id, e.target_id)
-                evidence = e.evidence.replace("|", "\\|")
-                lines.append(f"| {src_name} | {tgt_name} | {evidence} |")
+                src = node_name_map.get(e.source_id, e.source_id)
+                tgt = node_name_map.get(e.target_id, e.target_id)
+                stmt = f"- **{src}** {meta['label']} **{tgt}**"
+                if e.evidence:
+                    ev = e.evidence.strip().rstrip(".")
+                    stmt += f" — {ev}."
+                lines.append(stmt)
             lines.append("")
 
     return lines
+
+
+def _concept_graph_mermaid(
+    graph: "ConceptGraph",
+    node_name_map: dict[str, str],
+    max_edges: int = 24,
+) -> list[str]:
+    """
+    Render the concept graph as a Mermaid directed diagram with labelled edges.
+
+    Only nodes that participate in a shown edge are drawn, so isolated
+    concepts don't clutter the figure.  Capped at `max_edges` edges to keep
+    the diagram legible; a note is added if edges were omitted.
+    """
+    edges = graph.edges[:max_edges]
+    omitted = len(graph.edges) - len(edges)
+
+    def nid(node_id: str) -> str:
+        return "cg" + re.sub(r"[^a-zA-Z0-9]", "_", node_id)[:40]
+
+    out: list[str] = ["```mermaid", "graph LR"]
+
+    # Declare only the nodes that appear in a shown edge
+    used_ids: list[str] = []
+    seen: set[str] = set()
+    for e in edges:
+        for node_id in (e.source_id, e.target_id):
+            if node_id not in seen:
+                seen.add(node_id)
+                used_ids.append(node_id)
+    for node_id in used_ids:
+        name = _mermaid_label(node_name_map.get(node_id, node_id))
+        out.append(f'    {nid(node_id)}["{name}"]')
+
+    # Edges with relationship labels
+    for e in edges:
+        meta = _EDGE_META.get(e.edge_type, {"label": e.edge_type.replace("_", " ")})
+        label = _mermaid_label(meta["label"], max_len=22).replace('"', "")
+        out.append(f"    {nid(e.source_id)} -->|{label}| {nid(e.target_id)}")
+
+    out.append("```")
+    if omitted > 0:
+        out.append("")
+        out.append(f"> Showing {len(edges)} of {len(graph.edges)} relationships "
+                   f"({omitted} omitted for legibility — see the full list below).")
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
