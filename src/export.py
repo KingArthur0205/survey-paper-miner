@@ -307,7 +307,9 @@ class Exporter:
         path = self._topic_dir(topic) / "report.md"
 
         lines: list[str] = []
-        lines += _render_part1_field_architecture(topic, mega, arch_triples)
+        lines += _render_part1_field_architecture(
+            topic, mega, arch_triples, has_landmarks=bool(landmarks)
+        )
         lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
         if landmarks:
             lines += _render_landmark_papers(landmarks)
@@ -646,6 +648,7 @@ def _render_part1_field_architecture(
     topic: str,
     mega: FieldMegaArchitecture,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+    has_landmarks: bool = False,
 ) -> list[str]:
     n = len(mega.source_papers)
     n_gaps = len(mega.open_gaps)
@@ -667,7 +670,7 @@ def _render_part1_field_architecture(
         "  - [Research Gaps](#research-gaps)",
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
-        "- [Landmark Papers](#landmark-papers)",
+        *(["- [Landmark Papers](#landmark-papers)"] if has_landmarks else []),
         "- [Part 3 — Concept Graph](#part-3--concept-graph)",
         "  - [Concepts](#concepts)",
         "  - [Concept Map](#concept-map)",
@@ -1015,7 +1018,15 @@ def _render_part4_paper_cards(
         # Stats table
         lines.append("| Field | Value |")
         lines.append("|---|---|")
-        lines.append(f"| Citations | {p.citation_count} (influential: {p.influential_citation_count}) |")
+        # OpenAlex doesn't expose an "influential citation" count, so it is
+        # always 0 — only show it when a source actually provides one.
+        if p.influential_citation_count:
+            lines.append(
+                f"| Citations | {p.citation_count} "
+                f"(influential: {p.influential_citation_count}) |"
+            )
+        else:
+            lines.append(f"| Citations | {p.citation_count} |")
         if jr and not jr.judge_failed:
             if jr.recommended_action:
                 lines.append(f"| Recommended action | **{jr.recommended_action}** |")

@@ -209,9 +209,12 @@ def _openalex_lookup(query: str) -> dict | None:
     """
     from rapidfuzz import fuzz
 
+    # title.search matches the TITLE specifically. Plain `search` does full-text
+    # matching and floods results with unrelated high-citation papers (e.g. deep
+    # learning reviews), which then hijack the citation tie-break.
     params = {
-        "search": query,
-        "per-page": 8,
+        "filter": f"title.search:{query}",
+        "per-page": 25,
         "select": "id,title,publication_year,cited_by_count,doi",
         "mailto": _MAILTO,
     }
@@ -232,27 +235,33 @@ def _openalex_lookup(query: str) -> dict | None:
         title = (r.get("title") or "").strip()
         if not title:
             continue
-        # token_sort_ratio (not token_set_ratio) so a longer title that merely
-        # *contains* the query as a subset (e.g. "RocketQA … Dense Passage
-        # Retrieval …" vs the real "Dense Passage Retrieval …") scores lower
-        # than the exact title.
-        score = fuzz.token_sort_ratio(q_norm, _norm(title))
-        scored.append((score, r.get("cited_by_count", 0), r))
+        # set_ratio: does the title contain the query's words? (catches the
+        #   right paper but also longer supersets like "RocketQA … DPR …")
+        # sort_ratio: full-title closeness (penalises those supersets)
+        set_r = fuzz.token_set_ratio(q_norm, _norm(title))
+        sort_r = fuzz.token_sort_ratio(q_norm, _norm(title))
+        scored.append({"set": set_r, "sort": sort_r,
+                       "cites": r.get("cited_by_count", 0) or 0, "item": r})
 
-    if not scored:
+    # Keep titles that genuinely contain the query words
+    matches = [s for s in scored if s["set"] >= 85]
+    if not matches:
+        logger.debug("[landmarks] no OpenAlex title match for %r — skipping", query)
         return None
 
-    # Best title match first; citation count breaks ties between equal matches
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    best_score, _, best = scored[0]
-
-    # Require a confident title match; otherwise don't guess
-    if best_score < 80:
+    # Among them, take the closest full-title matches (within 5 pts of the best
+    # sort_ratio), then pick the MOST-CITED — this selects the canonical record
+    # over low-citation duplicate/preprint records of the same paper while
+    # rejecting superset titles (which have a clearly lower sort_ratio).
+    top_sort = max(s["sort"] for s in matches)
+    if top_sort < 70:
         logger.debug(
             "[landmarks] best OpenAlex title match for %r only scored %.0f — skipping",
-            query, best_score,
+            query, top_sort,
         )
         return None
+    near = [s for s in matches if s["sort"] >= top_sort - 5]
+    best = max(near, key=lambda s: s["cites"])["item"]
 
     oa_id = best.get("id") or ""
     doi = (best.get("doi") or "").strip()

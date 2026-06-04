@@ -30,7 +30,10 @@ exclude_domain_specific: true
 # repeatedly build on, so a newcomer can read the original techniques.
 landmarks_enabled: true
 landmark_min_mentions: 2      # must be referenced by >= this many surveys
-landmark_min_citations: 100   # must have >= this many citations (high-impact only)
+# Kept low on purpose: OpenAlex undercounts citations for seminal papers (the
+# original RAG paper shows ~18 there). The "referenced by >= N surveys" gate is
+# the real quality control.
+landmark_min_citations: 15
 landmark_max_count: 8         # cap the number surfaced
 
 survey_terms:

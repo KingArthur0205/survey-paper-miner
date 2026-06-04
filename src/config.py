@@ -75,7 +75,11 @@ class AppConfig:
     # that are genuinely high-impact.
     landmarks_enabled: bool = True
     landmark_min_mentions: int = 2     # must be referenced by >= this many surveys
-    landmark_min_citations: int = 100  # must have >= this many citations (high-impact)
+    # OpenAlex undercounts citations for seminal papers severely (the original
+    # RAG paper shows ~18 there vs thousands on Google Scholar), so this floor is
+    # intentionally low — the "referenced by >= N surveys" gate is the real
+    # quality control, and the LLM only proposes seminal works to begin with.
+    landmark_min_citations: int = 15
     landmark_max_count: int = 8        # cap the number surfaced
 
     # Research-gap detection thresholds
