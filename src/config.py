@@ -22,7 +22,13 @@ class AppConfig:
     year_from: int = 2021
     year_to: int = 2026
     max_results_per_query: int = 50   # per query per source; 50 is a sensible floor
-    top_n_to_summarize: int = 30
+    # How many filtered papers to summarise + judge.
+    #   > 0  : fixed cap (summarise the top-N by score)
+    #   0    : AUTO — summarise ALL papers that passed the pre-judge filters,
+    #          up to `max_summarize`, so the analysed count scales with the
+    #          fetch result instead of an arbitrary cap.
+    top_n_to_summarize: int = 0
+    max_summarize: int = 60           # safety ceiling for AUTO mode
     # Papers below this score are dropped after quality scoring (0 = keep all)
     min_quality_score: float = 20.0
 
@@ -41,14 +47,20 @@ class AppConfig:
 
     # Architecture analysis settings
     architecture_enabled: bool = True
-    analyze_top_n: int = 20         # per-paper architecture extraction limit
+    # Safety ceiling for per-paper architecture extraction. The input is already
+    # the judge-filtered relevant set, so this rarely binds — architecture
+    # analyses ALL relevant survivors up to this number.
+    analyze_top_n: int = 50
     mega_architecture_enabled: bool = True
 
     # Canonical Survey Detector
     canonical_detector_enabled: bool = True
 
     # LLM-as-Judge settings
-    judge_top_n: int = 50            # how many summarised papers to judge
+    # How many summarised papers to judge. Keep >= max_summarize so the judge
+    # assesses everything that was summarised (it's the relevance gate, so it
+    # shouldn't be the thing that arbitrarily caps the analysed count).
+    judge_top_n: int = 100
     # After judging, drop papers whose topic_relevance score is below this threshold.
     # Scale: 1=off-topic  2=tangential  3=related  4=directly relevant  5=exact topic.
     # Default 3 keeps "related but not specific" papers (e.g. conceptual agent taxonomy
@@ -139,17 +151,18 @@ def load_config(
         year_from=raw.get("year_from", 2021),
         year_to=raw.get("year_to", 2026),
         max_results_per_query=raw.get("max_results_per_query", 20),
-        top_n_to_summarize=raw.get("top_n_to_summarize", 30),
+        top_n_to_summarize=raw.get("top_n_to_summarize", 0),
+        max_summarize=raw.get("max_summarize", 60),
         min_quality_score=raw.get("min_quality_score", 20.0),
         venue_scores=venue_scores,
         output_dir=Path(raw.get("output_dir", "data/exports")),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         core_api_key=os.environ.get("CORE_API_KEY", ""),
         architecture_enabled=raw.get("architecture_enabled", True),
-        analyze_top_n=raw.get("analyze_top_n", 20),
+        analyze_top_n=raw.get("analyze_top_n", 50),
         mega_architecture_enabled=raw.get("mega_architecture_enabled", True),
         canonical_detector_enabled=llm_raw.get("canonical_detector_enabled", True),
-        judge_top_n=llm_raw.get("judge_top_n", 50),
+        judge_top_n=llm_raw.get("judge_top_n", 100),
         min_topic_relevance=raw.get("min_topic_relevance", 3),
         min_paper_tier=raw.get("min_paper_tier", "useful"),
         exclude_domain_specific=raw.get("exclude_domain_specific", False),

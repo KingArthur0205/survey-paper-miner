@@ -113,7 +113,7 @@ def _load_defaults() -> dict:
         year_from=2022,
         year_to=2026,
         max_results=50,
-        top_n=20,
+        top_n=0,
         min_score=15.0,
         min_topic_relevance=4,
         min_paper_tier="useful",
@@ -422,12 +422,14 @@ with c3:
     )
 with c4:
     top_n = st.number_input(
-        "Top N to analyse",
-        min_value=5, max_value=100,
+        "Top N to analyse (0 = auto)",
+        min_value=0, max_value=100,
         value=int(DEFAULTS["top_n"]), step=5,
-        help="The highest-scoring N papers are sent through the LLM passes "
-             "(summarisation, architecture analysis, judge). "
-             "Lower = cheaper & faster; higher = more comprehensive.",
+        help="How many filtered papers go through the LLM passes "
+             "(summarisation, architecture, judge). "
+             "0 = AUTO: analyse every paper that passed the filters (scales with "
+             "the fetch result); the judge then keeps the relevant subset. "
+             "A positive number caps it at a fixed value.",
     )
 
 c5, c6 = st.columns(2)

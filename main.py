@@ -506,17 +506,28 @@ def _run_analyze_steps(
                 "Set it in .env or pass --no-summarize to suppress this warning."
             )
         else:
-            logger.info(
-                "Summarising top %d papers with %s …",
-                cfg.top_n_to_summarize, "claude-sonnet-4-6",
-            )
+            # Dynamic sizing: top_n_to_summarize <= 0 means AUTO — summarise
+            # every paper that passed the pre-judge filters, up to max_summarize.
+            # So the analysed count scales with the fetch result rather than a
+            # fixed cap; the judge then filters to the relevant subset.
+            if cfg.top_n_to_summarize and cfg.top_n_to_summarize > 0:
+                effective_n = cfg.top_n_to_summarize
+                logger.info(
+                    "Summarising up to %d papers (fixed cap) with %s …",
+                    effective_n, "claude-sonnet-4-6",
+                )
+            else:
+                effective_n = min(len(scored_papers), cfg.max_summarize)
+                logger.info(
+                    "Summarising %d papers (AUTO — all %d filtered, cap %d) with %s …",
+                    effective_n, len(scored_papers), cfg.max_summarize, "claude-sonnet-4-6",
+                )
             # Guarantee curated top-cited surveys a slot in the summarise/judge
-            # window: place them first so they aren't pushed out of the top-N by
-            # higher-scored (often tangential, more-cited) papers. The judge
-            # re-ranks everything afterwards, so final report order is unaffected.
-            summarize_input = _prioritise_top_surveys(scored_papers, cfg.top_n_to_summarize)
+            # window: place them first so they aren't pushed out by higher-scored
+            # (often tangential, more-cited) papers. The judge re-ranks afterwards.
+            summarize_input = _prioritise_top_surveys(scored_papers, effective_n)
             summarizer = LLMSummarizer(cfg)
-            summary_pairs = summarizer.summarize_top_n(summarize_input, cfg.top_n_to_summarize)
+            summary_pairs = summarizer.summarize_top_n(summarize_input, effective_n)
             failed = sum(1 for _, s in summary_pairs if s.summarization_failed)
             logger.info(
                 "Summarisation complete: %d succeeded, %d failed",

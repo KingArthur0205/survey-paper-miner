@@ -1,7 +1,13 @@
 year_from: 2022       # LLM-in-education is mostly a post-ChatGPT phenomenon
 year_to: 2026
 max_results_per_query: 500
-top_n_to_summarize: 30
+
+# 0 = AUTO: summarise & judge every paper that passed the filters (up to
+# max_summarize), so the number of analysed surveys scales with the fetch
+# result. The judge then keeps the relevant subset. Set a positive number to
+# cap it at a fixed value instead.
+top_n_to_summarize: 0
+max_summarize: 60
 
 # LLM-in-education papers are newer → fewer citations → lower threshold
 # Average 15
