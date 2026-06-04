@@ -1034,10 +1034,11 @@ def _render_part4_paper_cards(
             )
             lines.append("")
 
-        # Organizational logic
+        # Organizational logic — formatted as scannable bullets, not a wall of text
         if arch.organizational_logic:
             lines.append("**How it organises the field:**")
-            lines.append(arch.organizational_logic)
+            lines.append("")
+            lines += _format_prose_as_bullets(arch.organizational_logic)
             lines.append("")
 
         # Structural strengths and weaknesses (from architecture analysis)
@@ -1615,6 +1616,47 @@ def _short_title(title: str, max_words: int = 5) -> str:
     if len(words) <= max_words:
         return title
     return " ".join(words[:max_words]) + "…"
+
+
+# Abbreviations whose trailing dot must NOT be treated as a sentence boundary.
+_SENTENCE_ABBREV = (
+    "e.g.", "i.e.", "etc.", "vs.", "cf.", "et al.", "al.", "Fig.", "Eq.",
+    "Sec.", "approx.", "Ref.", "No.", "Dr.", "Mr.", "Ms.", "Prof.",
+)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """
+    Split prose into sentences, protecting common abbreviations so their
+    trailing period is not mistaken for a sentence boundary.
+    """
+    protected = text
+    for ab in _SENTENCE_ABBREV:
+        protected = protected.replace(ab, ab.replace(".", "\x00"))
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", protected)
+    return [p.replace("\x00", ".").strip() for p in parts if p.strip()]
+
+
+def _format_prose_as_bullets(text: str, max_bullets: int = 6) -> list[str]:
+    """
+    Turn a free-text paragraph into scannable Markdown.
+
+    - A single sentence is rendered as a block-quote line.
+    - Multiple sentences become a bullet list (one bullet per sentence),
+      capped at `max_bullets`.
+    """
+    text = " ".join(str(text).split())   # collapse whitespace
+    if not text:
+        return []
+    sentences = _split_sentences(text)
+    if len(sentences) <= 1:
+        return [f"> {text}"]
+    bullets = [f"- {s}" for s in sentences[:max_bullets]]
+    if len(sentences) > max_bullets:
+        # fold any overflow into the last bullet so no content is lost
+        remainder = " ".join(sentences[max_bullets:])
+        bullets[-1] = bullets[-1] + " " + remainder
+    return bullets
 
 
 def _mermaid_label(text: str, max_len: int = 48) -> str:
