@@ -1010,22 +1010,14 @@ def _render_part4_paper_cards(
         # Stats table
         lines.append("| Field | Value |")
         lines.append("|---|---|")
-        if arch.orientation and not arch.analysis_failed:
-            lines.append(f"| Orientation | {arch.orientation} |")
         lines.append(f"| Citations | {p.citation_count} (influential: {p.influential_citation_count}) |")
-        if p.canonical_score > 0:
-            lines.append(f"| Canonical score | {p.canonical_score:.3f} |")
         if jr and not jr.judge_failed:
             if jr.recommended_action:
                 lines.append(f"| Recommended action | **{jr.recommended_action}** |")
-            if jr.authority_assessment:
-                lines.append(f"| LLM authority | {jr.authority_assessment} |")
             if jr.scope_clarity:
                 lines.append(f"| Scope | {jr.scope_clarity} |")
             if jr.coverage_depth:
                 lines.append(f"| Coverage depth | {jr.coverage_depth} |")
-            if jr.confidence:
-                lines.append(f"| Judge confidence | {jr.confidence:.2f} |")
         if summary and not summary.summarization_failed and summary.taxonomy:
             lines.append(f"| Covers | {' · '.join(summary.taxonomy[:5])} |")
         lines.append("")
