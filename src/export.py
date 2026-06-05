@@ -306,14 +306,17 @@ class Exporter:
         """
         path = self._topic_dir(topic) / "report.md"
 
+        show_concept_graph = bool(concept_graph and not concept_graph.extraction_failed)
         lines: list[str] = []
         lines += _render_part1_field_architecture(
-            topic, mega, arch_triples, has_landmarks=bool(landmarks)
+            topic, mega, arch_triples,
+            has_landmarks=bool(landmarks),
+            has_concept_graph=show_concept_graph,
         )
         lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
         if landmarks:
             lines += _render_landmark_papers(landmarks)
-        if concept_graph and not concept_graph.extraction_failed:
+        if show_concept_graph:
             lines += _render_part3_concept_graph(concept_graph)
         lines += _render_part4_paper_cards(arch_triples, judge_map)
 
@@ -649,6 +652,7 @@ def _render_part1_field_architecture(
     mega: FieldMegaArchitecture,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
     has_landmarks: bool = False,
+    has_concept_graph: bool = False,
 ) -> list[str]:
     n = len(mega.source_papers)
     n_gaps = len(mega.open_gaps)
@@ -671,10 +675,12 @@ def _render_part1_field_architecture(
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
         *(["- [Landmark Papers](#landmark-papers)"] if has_landmarks else []),
-        "- [Part 3 — Concept Graph](#part-3--concept-graph)",
-        "  - [Concepts](#concepts)",
-        "  - [Concept Map](#concept-map)",
-        "  - [How Concepts Relate](#how-concepts-relate)",
+        *([
+            "- [Part 3 — Concept Graph](#part-3--concept-graph)",
+            "  - [Concepts](#concepts)",
+            "  - [Concept Map](#concept-map)",
+            "  - [How Concepts Relate](#how-concepts-relate)",
+        ] if has_concept_graph else []),
         "- [Part 4 — Paper Cards](#part-4--paper-cards)",
         "",
         "---",
