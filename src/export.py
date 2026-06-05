@@ -647,6 +647,65 @@ def _paper_anchor(sp: ScoredPaper) -> str:
     return f"{slug}-{year}"
 
 
+def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
+    """
+    Field Map as a directory-style nested outline (instead of a Mermaid
+    mind-map). Reads the same structured mega-architecture fields, so it stays
+    consistent with the report's tables, but renders as plain nested bullets
+    that are readable in ANY viewer without diagram support.
+    """
+    n = len(mega.source_papers)
+    low = max(1, round(n * 0.3))
+    out: list[str] = []
+
+    def cov(info: object) -> str:
+        if isinstance(info, dict) and isinstance(info.get("coverage_count"), int):
+            c = info["coverage_count"]
+            return f"  ·  {c}/{n} surveys" + (" ⚠️" if c < low else "")
+        return ""
+
+    if mega.major_tasks:
+        out.append("- **Major Tasks**")
+        for name, info in list(mega.major_tasks.items())[:8]:
+            out.append(f"  - {name}{cov(info)}")
+
+    if mega.method_families:
+        out.append("- **Method Families**")
+        for name, info in list(mega.method_families.items())[:8]:
+            reps = ""
+            if isinstance(info, dict):
+                rm = [str(x) for x in (info.get("representative_methods") or [])][:4]
+                if rm:
+                    reps = f" — {', '.join(rm)}"
+            out.append(f"  - {name}{reps}{cov(info)}")
+
+    benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
+    if benches:
+        out.append("- **Benchmarks & Datasets**")
+        for b in benches[:8]:
+            out.append(f"  - {b}")
+
+    if mega.challenges:
+        out.append("- **Challenges**")
+        for name, info in list(mega.challenges.items())[:8]:
+            sev = ""
+            if isinstance(info, dict) and str(info.get("severity", "")).strip():
+                sev = f" `{str(info['severity']).strip()}`"
+            out.append(f"  - {name}{sev}{cov(info)}")
+
+    if mega.open_gaps:
+        out.append("- **Research Gaps**")
+        for g in mega.open_gaps[:6]:
+            out.append(f"  - {g.gap}")
+
+    if mega.applications:
+        out.append("- **Applications**")
+        for a in mega.applications[:8]:
+            out.append(f"  - {a}")
+
+    return out
+
+
 def _render_part1_field_architecture(
     topic: str,
     mega: FieldMegaArchitecture,
@@ -714,17 +773,12 @@ def _render_part1_field_architecture(
         )
     lines.append("")
 
-    # Mermaid diagram
+    # Field Map — directory-style outline (readable in any viewer, no Mermaid)
+    lines += ["---", "", "### Field Map", ""]
+    lines += _render_field_outline(mega)
     lines += [
-        "---",
         "",
-        "### Field Map",
-        "",
-        "```mermaid",
-        mega.mermaid_diagram or "graph TD\n    Field[\"" + topic.title() + "\"]",
-        "```",
-        "",
-        "> ⚠️ nodes are covered by fewer than 30% of analysed surveys — likely research gaps.",
+        "> ⚠️ marks items covered by fewer than 30% of analysed surveys — likely research gaps.",
         "",
         "---",
         "",
