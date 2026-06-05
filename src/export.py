@@ -338,8 +338,11 @@ class Exporter:
         outline_md = "\n".join(_render_field_outline(mega))
         mermaid_src = mega.mermaid_diagram or f"mindmap\n  root(({topic.title()}))"
         field_tree = _field_tree_html_data(mega)
+        problem_tree = _problem_tree_html_data(mega)
 
-        html = _build_html_report(topic, body_md, outline_md, mermaid_src, field_tree)
+        html = _build_html_report(
+            topic, body_md, outline_md, mermaid_src, field_tree, problem_tree,
+        )
         path = self._topic_dir(topic) / "report.html"
         path.write_text(html, encoding="utf-8")
         logger.info("HTML report exported: %s", path)
@@ -734,7 +737,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .ft-item:hover{background:#f3f4f6}
   .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600}
   .ft-item.dim{opacity:.32}
-  #ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
+  .ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
   .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
           border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
           padding:.55rem 1.5rem;font-size:.8rem;color:var(--muted)}
@@ -751,6 +754,7 @@ const REPORT_MD   = __REPORT_MD__;
 const OUTLINE_MD  = __OUTLINE_MD__;
 const MERMAID_SRC = __MERMAID_SRC__;
 const FIELD_TREE  = __FIELD_TREE__;
+const PROBLEM_TREE = __PROBLEM_TREE__;
 
 mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
 
@@ -781,20 +785,20 @@ if(slot){
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
 mermaid.run();
 
-// 5. Field Tree — interactive two-column linked view
-(function(){
-  var slot=document.getElementById("fieldtree-slot");
-  if(!slot || !FIELD_TREE.pairs || !FIELD_TREE.pairs.length){
-    if(slot) slot.innerHTML="<p style='color:#6b7280'>Not enough data to build the field tree.</p>";
+// 5. Interactive two-column linked views (Field Tree + Problem Tree)
+function renderLinkedTree(slotId, TREE){
+  var slot=document.getElementById(slotId);
+  if(!slot || !TREE.pairs || !TREE.pairs.length){
+    if(slot) slot.innerHTML="<p style='color:#6b7280'>Not enough data to build this tree.</p>";
     return;
   }
-  var pairs=FIELD_TREE.pairs;
+  var pairs=TREE.pairs;
   function esc(s){var d=document.createElement("div");d.textContent=s;return d.innerHTML;}
   var tabs='<div class="fm-tabs">';
   pairs.forEach(function(p,i){
     tabs+='<button class="ft-pair'+(i===0?" active":"")+'" data-i="'+i+'">'+esc(p.leftLabel)+" ↔ "+esc(p.rightLabel)+"</button>";
   });
-  tabs+='</div><div id="ft-view"></div><p id="ft-hint">Click any item on either side to highlight what it connects to.</p>';
+  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click any item on either side to highlight what it connects to.</p>';
   slot.innerHTML=tabs;
   slot.querySelectorAll(".ft-pair").forEach(function(b){
     b.addEventListener("click",function(){
@@ -814,7 +818,7 @@ mermaid.run();
       '</div><div class="ft-col"><div class="ft-h">'+esc(p.rightLabel)+'</div>'+
       rights.map(function(r,i){return '<div class="ft-item" data-side="R" data-id="'+i+'">'+esc(r)+'</div>';}).join("")+
       '</div></div>';
-    var view=document.getElementById("ft-view"); view.innerHTML=html;
+    var view=slot.querySelector(".ft-view"); view.innerHTML=html;
     function clear(){view.querySelectorAll(".ft-item").forEach(function(e){e.classList.remove("active","dim");});}
     view.querySelectorAll('.ft-item[data-side=L]').forEach(function(el,i){
       el.addEventListener("click",function(){
@@ -835,7 +839,9 @@ mermaid.run();
       });
     });
   }
-})();
+}
+renderLinkedTree("fieldtree-slot", FIELD_TREE);
+renderLinkedTree("problemtree-slot", PROBLEM_TREE);
 
 function showFM(which){
   document.getElementById("fm-v-outline").style.display = which==="outline"?"":"none";
@@ -851,12 +857,15 @@ function showFM(which){
 
 def _build_html_report(
     topic: str, body_md: str, outline_md: str, mermaid_src: str,
-    field_tree: dict | None = None,
+    field_tree: dict | None = None, problem_tree: dict | None = None,
 ) -> str:
     """Fill the HTML template, JSON-encoding the strings for safe embedding."""
     def js(s: str) -> str:
         # JSON-encode, then neutralise any "</" so it can't close the <script>
         return json.dumps(s).replace("</", "<\\/")
+
+    def jsdata(d: dict | None) -> str:
+        return json.dumps(d or {"pairs": []}).replace("</", "<\\/")
 
     return (
         _HTML_REPORT_TEMPLATE
@@ -864,7 +873,8 @@ def _build_html_report(
         .replace("__REPORT_MD__", js(body_md))
         .replace("__OUTLINE_MD__", js(outline_md))
         .replace("__MERMAID_SRC__", js(mermaid_src))
-        .replace("__FIELD_TREE__", json.dumps(field_tree or {"pairs": []}).replace("</", "<\\/"))
+        .replace("__FIELD_TREE__", jsdata(field_tree))
+        .replace("__PROBLEM_TREE__", jsdata(problem_tree))
     )
 
 
@@ -1047,6 +1057,125 @@ def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     return {"pairs": pairs}
 
 
+# ── Problem Tree (problem-exposing chain: research area → challenge → gap) ────
+
+_BLUESKY_LABEL = "✦ Blue-sky ideas (no current challenge)"
+
+
+def _problem_tree_relations(
+    mega: FieldMegaArchitecture,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+    """
+    Extract the relations behind the problem-exposing tree:
+      area_chal:  research-area name -> [challenge names]   (many-to-many)
+      chal_gap:   challenge name     -> [gap sentences]      (many-to-many)
+      free_gaps:  [gap sentences]    gaps tied to NO challenge (blue-sky ideas)
+    Challenge names from the LLM are matched back to real `challenges` keys.
+    """
+    chal_lower = {c.lower(): c for c in mega.challenges.keys()}
+
+    def resolve_chal(c: str) -> str | None:
+        cl = c.lower().strip()
+        if cl in chal_lower:
+            return chal_lower[cl]
+        for clk, cn in chal_lower.items():        # fuzzy: substring either way
+            if cl and (cl in clk or clk in cl):
+                return cn
+        return None
+
+    area_chal: dict[str, list[str]] = {}
+    for area, info in mega.major_tasks.items():
+        if not isinstance(info, dict):
+            continue
+        cs: list[str] = []
+        for c in (info.get("challenges") or []):
+            ch = resolve_chal(str(c))
+            if ch and ch not in cs:
+                cs.append(ch)
+        if cs:
+            area_chal[area] = cs
+
+    chal_gap: dict[str, list[str]] = {}
+    free_gaps: list[str] = []
+    for gap in mega.open_gaps:
+        g = gap.gap.strip()
+        if not g:
+            continue
+        linked: list[str] = []
+        for c in gap.related_challenges:
+            ch = resolve_chal(str(c))
+            if ch and ch not in linked:
+                linked.append(ch)
+        if linked:
+            for ch in linked:
+                chal_gap.setdefault(ch, [])
+                if g not in chal_gap[ch]:
+                    chal_gap[ch].append(g)
+        else:
+            free_gaps.append(g)
+
+    return area_chal, chal_gap, free_gaps
+
+
+def _render_problem_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
+    """
+    Static (Markdown) Problem Tree — the problem-exposing chain:
+        Research Area → Challenge → Research Gap
+    "Blue-sky" gaps motivated by no current challenge are listed separately.
+    """
+    area_chal, chal_gap, free_gaps = _problem_tree_relations(mega)
+    out: list[str] = []
+
+    if area_chal:
+        for area, chals in area_chal.items():
+            out.append(f"- **{area}** *(research area)*")
+            for ch in chals:
+                out.append(f"  - **{ch}** *(challenge)*")
+                for g in chal_gap.get(ch, []):
+                    out.append(f"    - {g}")
+    elif chal_gap:  # fallback: no area→challenge links, just challenge → gaps
+        for ch, gaps in chal_gap.items():
+            out.append(f"- **{ch}** *(challenge)*")
+            for g in gaps:
+                out.append(f"  - {g}")
+
+    if free_gaps:
+        out.append("- **Blue-sky ideas** *(open gaps not tied to a current challenge)*")
+        for g in free_gaps:
+            out.append(f"  - {g}")
+
+    return out
+
+
+def _problem_tree_html_data(mega: FieldMegaArchitecture) -> dict:
+    """
+    JSON-able data for the interactive (HTML) two-column linked view of the
+    problem-exposing tree, covering each adjacent layer:
+        Research Areas ↔ Challenges ↔ Research Gaps
+    Blue-sky gaps appear under a special left node in the Challenges ↔ Gaps view.
+    """
+    area_chal, chal_gap, free_gaps = _problem_tree_relations(mega)
+
+    def short(s: str, n: int = 80) -> str:
+        return (s[: n - 1] + "…") if len(s) > n else s
+
+    pairs: list[dict] = []
+    if area_chal:
+        pairs.append({
+            "key": "area-challenge", "leftLabel": "Research Areas",
+            "rightLabel": "Challenges", "links": area_chal,
+        })
+    if chal_gap or free_gaps:
+        links = {ch: [short(g) for g in gaps] for ch, gaps in chal_gap.items()}
+        if free_gaps:
+            links[_BLUESKY_LABEL] = [short(g) for g in free_gaps]
+        pairs.append({
+            "key": "challenge-gap", "leftLabel": "Challenges",
+            "rightLabel": "Research Gaps", "links": links,
+        })
+    return {"pairs": pairs}
+
+
 def _render_part1_field_architecture(
     topic: str,
     mega: FieldMegaArchitecture,
@@ -1074,6 +1203,7 @@ def _render_part1_field_architecture(
         "  - [Core Problems](#core-problems)",
         "  - [Research Landscape](#research-landscape)",
         "  - [Research Gaps](#research-gaps)",
+        "  - [Problem Tree](#problem-tree)",
         "- [Part 2 — Survey Navigator](#part-2--survey-navigator)",
         "  - [Reading Guide](#reading-guide-where-to-start)",
         *(["- [Landmark Papers](#landmark-papers)"] if has_landmarks else []),
@@ -1202,6 +1332,28 @@ def _render_part1_field_architecture(
             lines.append("")
     else:
         lines.append("*No research gaps identified.*")
+        lines.append("")
+
+    # Problem Tree — the problem-exposing chain: research area → challenge → gap
+    lines += [
+        "---",
+        "",
+        "### Problem Tree",
+        "",
+        "> The problem-exposing chain: **Research Area → Challenge → Research Gap**. "
+        "Each area still faces several challenges (many-to-many), and each challenge "
+        "opens onto research gaps. *Blue-sky* gaps that no current challenge motivates "
+        "are listed on their own.",
+        "",
+    ]
+    if style == "__slot__":
+        lines += ['<div id="problemtree-slot"></div>', ""]
+    else:
+        ptree = _render_problem_tree_outline(mega)
+        lines += ptree if ptree else [
+            "*Not enough data to build the problem tree "
+            "(re-run the pipeline to populate area→challenge and gap→challenge links).*"
+        ]
         lines.append("")
 
     return lines

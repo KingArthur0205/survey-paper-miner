@@ -82,8 +82,10 @@ data/exports/computer-vision_2026-05-28/
 ```
 
 The report comes in **two formats with the same content** — pick whichever you prefer:
-- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map has **📋 Outline / 📊 Diagram** buttons, and the **Field Tree** lets you click a research area or method to highlight what it links to.
+- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map has **📋 Outline / 📊 Diagram** buttons, the **Field Tree** (problem-solving chain: Background → Topic → Research Area → Method → Technique) and the **Problem Tree** (problem-exposing chain: Research Area → Challenge → Research Gap) both let you click any item to highlight what it links to.
 - **`report.md`** — the Markdown version, best if you read in GitHub / VS Code / Obsidian.
+
+> **Two trees, two viewpoints.** The **Field Tree** answers *"how is the field solving its problems?"* (drivers → topic → areas → methods → techniques). The **Problem Tree** answers *"where is the field still stuck?"* (areas → open challenges → research gaps), with speculative *blue-sky* gaps — ideas no current challenge motivates — listed separately. Benchmarks are reported **only when the surveyed papers name them** — none are added from outside knowledge.
 
 ---
 

@@ -220,6 +220,9 @@ class ResearchGap(BaseModel):
     gap_type: str = ""   # "frequency" | "future_convergence" | "conflict"
     evidence: list[str] = Field(default_factory=list)  # paper titles that signal this gap
     opportunity_score: float = 0.0
+    # Challenge names this gap stems from. Empty = a "blue-sky" gap not tied to
+    # any current challenge (used by the problem-exposing tree).
+    related_challenges: list[str] = Field(default_factory=list)
 
 
 class ParsedPaper(BaseModel):

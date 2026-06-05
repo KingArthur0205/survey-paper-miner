@@ -79,6 +79,7 @@ _SYNTH_SCHEMA = """
       "description": "one sentence",
       "subtasks": ["...", "..."],
       "methods": ["<method-family name this task uses>", "..."],
+      "challenges": ["<challenge name this area still faces>", "..."],
       "coverage_count": 4
     }
   },
@@ -107,7 +108,8 @@ _SYNTH_SCHEMA = """
       "gap": "one sentence",
       "gap_type": "frequency | future_convergence | conflict",
       "evidence": ["paper title 1", "paper title 2"],
-      "opportunity_score": 0.85
+      "opportunity_score": 0.85,
+      "related_challenges": ["<challenge name this gap stems from, or [] for a blue-sky idea>"]
     }
   ],
   "suggested_title_template": "A Survey on [X]: [subtitle]",
@@ -126,8 +128,17 @@ _SYNTH_SYSTEM = (
     "For each major_task, the 'methods' list must contain method-family names that "
     "EXACTLY match keys in method_families — these encode which methods each research "
     "area uses (a method may appear under several tasks). "
+    "For each major_task, the 'challenges' list must contain challenge names that EXACTLY "
+    "match keys in challenges — these encode which open problems each research area still "
+    "faces (a challenge may appear under several areas; this is many-to-many). "
     "open_gaps should identify topics that are underrepresented or conceptually unresolved "
-    "across the surveys. "
+    "across the surveys. For each gap, 'related_challenges' must list the challenge names "
+    "(EXACT keys in challenges) the gap stems from — many-to-many. A speculative, blue-sky "
+    "gap that no current challenge motivates should have related_challenges = [] (it stays "
+    "free-floating). "
+    "datasets_and_benchmarks must contain ONLY benchmarks explicitly named in the input "
+    "papers — never add benchmarks from outside knowledge, and do not invent one for a "
+    "research area that the papers do not benchmark. "
     "Return ONLY valid JSON matching the schema. "
     "Keep every string field concise (1-3 sentences max). "
     "Limit: core_problems ≤ 6 items, method_families ≤ 8 keys, challenges ≤ 6 keys, "
@@ -313,6 +324,7 @@ def _build_mega_architecture(
                 gap_type=str(g.get("gap_type", "")),
                 evidence=[str(e) for e in (g.get("evidence") or [])],
                 opportunity_score=float(g.get("opportunity_score", 0.0)),
+                related_challenges=[str(c) for c in (g.get("related_challenges") or [])],
             ))
     gaps.sort(key=lambda g: g.opportunity_score, reverse=True)
 
