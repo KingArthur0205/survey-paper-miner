@@ -52,6 +52,11 @@ class AppConfig:
     # analyses ALL relevant survivors up to this number.
     analyze_top_n: int = 50
     mega_architecture_enabled: bool = True
+    # How the Field Map is rendered in the report:
+    #   "outline" — directory-style nested list (readable in any viewer)
+    #   "diagram" — Mermaid mind-map (needs a Mermaid-capable viewer)
+    #   "both"    — show both
+    field_map_style: str = "outline"
 
     # Canonical Survey Detector
     canonical_detector_enabled: bool = True
@@ -161,6 +166,7 @@ def load_config(
         architecture_enabled=raw.get("architecture_enabled", True),
         analyze_top_n=raw.get("analyze_top_n", 50),
         mega_architecture_enabled=raw.get("mega_architecture_enabled", True),
+        field_map_style=str(raw.get("field_map_style", "outline")).lower(),
         canonical_detector_enabled=llm_raw.get("canonical_detector_enabled", True),
         judge_top_n=llm_raw.get("judge_top_n", 100),
         min_topic_relevance=raw.get("min_topic_relevance", 3),

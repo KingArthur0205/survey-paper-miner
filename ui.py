@@ -118,6 +118,7 @@ def _load_defaults() -> dict:
         min_topic_relevance=4,
         min_paper_tier="useful",
         exclude_domain_specific=False,
+        field_map_style="outline",
         output_dir="data/exports",
     )
     if path.exists():
@@ -133,6 +134,7 @@ def _load_defaults() -> dict:
         d["min_topic_relevance"]     = raw.get("min_topic_relevance",     d["min_topic_relevance"])
         d["min_paper_tier"]          = raw.get("min_paper_tier",          d["min_paper_tier"])
         d["exclude_domain_specific"] = raw.get("exclude_domain_specific", d["exclude_domain_specific"])
+        d["field_map_style"]         = raw.get("field_map_style", d["field_map_style"])
         d["output_dir"]  = raw.get("output_dir",            d["output_dir"])
     return d
 
@@ -162,6 +164,7 @@ def _write_config_yaml(run_cfg: dict, tmp_dir: str) -> str:
         "min_topic_relevance":       run_cfg["min_topic_relevance"],
         "min_paper_tier":            run_cfg["min_paper_tier"],
         "exclude_domain_specific":   run_cfg["exclude_domain_specific"],
+        "field_map_style":           run_cfg["field_map_style"],
         "output_dir":                run_cfg["output_dir"],
         "architecture_enabled":      run_cfg["use_architecture"],
         "mega_architecture_enabled": run_cfg["use_architecture"],
@@ -493,6 +496,25 @@ with c8:
              "domain applications.",
     )
 
+c9, _c10 = st.columns(2)
+with c9:
+    _fm_opts = ["outline", "diagram", "both"]
+    _fm_default = str(DEFAULTS["field_map_style"]).lower()
+    field_map_style = st.selectbox(
+        "Field Map style",
+        options=_fm_opts,
+        index=_fm_opts.index(_fm_default) if _fm_default in _fm_opts else 0,
+        format_func={
+            "outline": "outline — directory-style list (readable anywhere)",
+            "diagram": "diagram — Mermaid mind-map",
+            "both":    "both — list + diagram",
+        }.__getitem__,
+        help="How the Field Map appears in Part 1 of the report. "
+             "'outline' is a nested bullet list that reads well in any viewer; "
+             "'diagram' is a Mermaid mind-map (needs a Mermaid-capable viewer); "
+             "'both' shows them together.",
+    )
+
 st.divider()
 
 
@@ -737,6 +759,7 @@ if run_btn and not st.session_state.running:
         min_topic_relevance     = int(min_topic_relevance),
         min_paper_tier          = str(min_paper_tier),
         exclude_domain_specific = bool(exclude_domain_specific),
+        field_map_style         = str(field_map_style),
         output_dir        = output_dir,
         db_path           = db_path,
         papers_file       = papers_file,

@@ -292,6 +292,7 @@ class Exporter:
         reading_path: "ReadingPath | None" = None,
         concept_graph: "ConceptGraph | None" = None,
         landmarks: "list[LandmarkPaper] | None" = None,
+        field_map_style: str = "outline",
     ) -> Path:
         """
         Write the full architecture report for one topic to its sub-folder.
@@ -312,6 +313,7 @@ class Exporter:
             topic, mega, arch_triples,
             has_landmarks=bool(landmarks),
             has_concept_graph=show_concept_graph,
+            field_map_style=field_map_style,
         )
         lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
         if landmarks:
@@ -712,6 +714,7 @@ def _render_part1_field_architecture(
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
     has_landmarks: bool = False,
     has_concept_graph: bool = False,
+    field_map_style: str = "outline",
 ) -> list[str]:
     n = len(mega.source_papers)
     n_gaps = len(mega.open_gaps)
@@ -773,9 +776,22 @@ def _render_part1_field_architecture(
         )
     lines.append("")
 
-    # Field Map — directory-style outline (readable in any viewer, no Mermaid)
+    # Field Map — diagram (Mermaid), outline (directory-style list), or both
     lines += ["---", "", "### Field Map", ""]
-    lines += _render_field_outline(mega)
+    style = (field_map_style or "outline").lower()
+    mermaid_block = [
+        "```mermaid",
+        mega.mermaid_diagram or ("mindmap\n  root((" + topic.title() + "))"),
+        "```",
+        "",
+    ]
+    if style == "diagram":
+        lines += mermaid_block
+    elif style == "both":
+        lines += mermaid_block
+        lines += _render_field_outline(mega)
+    else:  # "outline" (default) or any unrecognised value
+        lines += _render_field_outline(mega)
     lines += [
         "",
         "> ⚠️ marks items covered by fewer than 30% of analysed surveys — likely research gaps.",

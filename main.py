@@ -823,6 +823,7 @@ def _run_analyze_steps(
             reading_path=rp,
             concept_graph=cg,
             landmarks=lms,
+            field_map_style=cfg.field_map_style,
         )
         arch_report_paths.append(rpt)
 
