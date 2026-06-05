@@ -72,8 +72,8 @@ Outputs are written to `data/exports/<topics>_<date>/`.
 data/exports/computer-vision_2026-05-28/
 ├── papers_ranked.xlsx          ← ranked papers + summaries (open in Excel)
 └── computer-vision/            ← per-topic sub-folder
-    ├── report.md               ← THE MAIN REPORT (field map, reading path,
-    │                              concept graph, landmark papers, paper cards)
+    ├── report.html             ← THE MAIN REPORT, interactive (double-click → browser)
+    ├── report.md               ← same report as Markdown (for GitHub/VS Code/Obsidian)
     ├── mindmap.html            ← interactive mindmap (double-click → browser)
     ├── architecture.json       ← machine-readable mega-architecture
     ├── architecture.mmd        ← Mermaid source of the field diagram
@@ -81,17 +81,24 @@ data/exports/computer-vision_2026-05-28/
     └── reading_path.json       ← sequenced newcomer reading list
 ```
 
+The report comes in **two formats with the same content** — pick whichever you prefer:
+- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map has **📋 Outline / 📊 Diagram** buttons you can toggle.
+- **`report.md`** — the Markdown version, best if you read in GitHub / VS Code / Obsidian.
+
 ---
 
 ## How to open the report (no Markdown experience needed)
 
-Each run produces three things you'll actually look at. Here they are, **easiest first**:
+Each run produces a few things you'll actually look at. Here they are, **easiest first**:
 
 | File | How to open | What it is |
 |---|---|---|
-| **`papers_ranked.xlsx`** | Double-click → opens in **Excel / Numbers / Google Sheets** | The ranked list of papers with summaries. Zero setup. |
-| **`mindmap.html`** | Double-click → opens in your **web browser** | An interactive mind-map of the field. Zero setup, no internet needed. |
-| **`report.md`** | See below ↓ | The full report — field map, reading path, concept graph, landmark papers, and one card per paper. |
+| **`report.html`** ⭐ | **Double-click → opens in your browser** | The full report, interactive. Zero setup. Toggle the Field Map between outline and diagram with a click. **Start here.** |
+| **`papers_ranked.xlsx`** | Double-click → **Excel / Numbers / Google Sheets** | The ranked list of papers with summaries. |
+| **`mindmap.html`** | Double-click → browser | An interactive mind-map of the field. |
+| **`report.md`** | See below ↓ | The same report as Markdown — for reading in GitHub / VS Code / Obsidian. |
+
+> 💡 **If you're not technical, just double-click `report.html`.** Everything renders in your browser with no setup. The Markdown (`report.md`) section below is only for people who prefer GitHub / VS Code / Obsidian.
 
 ### Why can't I just double-click `report.md`?
 
@@ -115,7 +122,7 @@ Upload the report folder to any GitHub repository and open `report.md` on the we
 
 Turn it into a **PDF**: in VS Code, install the **"Markdown PDF"** extension, then right-click the report → *"Markdown PDF: Export (pdf)"*. You get a normal PDF anyone can open.
 
-> 💡 In short: for a quick look, open **`mindmap.html`** (browser) and **`papers_ranked.xlsx`** (Excel). For the full report, open **`report.md`** in **VS Code** or **Obsidian**.
+> 💡 In short: **just double-click `report.html`** — full report in your browser, nothing to install. Use **`report.md`** (in VS Code / Obsidian / GitHub) only if you specifically want the Markdown version.
 
 ---
 

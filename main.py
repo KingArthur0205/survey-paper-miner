@@ -827,6 +827,19 @@ def _run_analyze_steps(
         )
         arch_report_paths.append(rpt)
 
+        # Interactive HTML version (Field Map outline/diagram toggle in-browser)
+        try:
+            html_rpt = exporter.export_html_report(
+                topic_key, triples, mega,
+                judge_map=judge_map or None,
+                reading_path=rp,
+                concept_graph=cg,
+                landmarks=lms,
+            )
+            arch_report_paths.append(html_rpt)
+        except Exception as exc:
+            logger.warning("[export] HTML report failed for '%s': %s", topic_key, exc)
+
         json_path = exporter.export_mega_architecture_json(topic_key, mega)
         if json_path:
             arch_report_paths.append(json_path)

@@ -306,24 +306,42 @@ class Exporter:
         user can click between sections in any Markdown viewer.
         """
         path = self._topic_dir(topic) / "report.md"
-
-        show_concept_graph = bool(concept_graph and not concept_graph.extraction_failed)
-        lines: list[str] = []
-        lines += _render_part1_field_architecture(
-            topic, mega, arch_triples,
-            has_landmarks=bool(landmarks),
-            has_concept_graph=show_concept_graph,
-            field_map_style=field_map_style,
+        md = _build_report_markdown(
+            topic, arch_triples, mega, judge_map, reading_path,
+            concept_graph, landmarks, field_map_style,
         )
-        lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
-        if landmarks:
-            lines += _render_landmark_papers(landmarks)
-        if show_concept_graph:
-            lines += _render_part3_concept_graph(concept_graph)
-        lines += _render_part4_paper_cards(arch_triples, judge_map)
-
-        path.write_text("\n".join(lines), encoding="utf-8")
+        path.write_text(md, encoding="utf-8")
         logger.info("Architecture report exported: %s (%d papers)", path, len(arch_triples))
+        return path
+
+    def export_html_report(
+        self,
+        topic: str,
+        arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+        mega: FieldMegaArchitecture,
+        judge_map: dict[str, JudgeResult] | None = None,
+        reading_path: "ReadingPath | None" = None,
+        concept_graph: "ConceptGraph | None" = None,
+        landmarks: "list[LandmarkPaper] | None" = None,
+    ) -> Path:
+        """
+        Write a self-contained `report.html` — the same report, rendered in the
+        browser, where the Field Map can be toggled between an outline and a
+        Mermaid diagram with a click. Double-click to open; no server needed.
+        """
+        # Build the report body with a placeholder where the Field Map goes,
+        # so the HTML page can inject the interactive (outline/diagram) tabs.
+        body_md = _build_report_markdown(
+            topic, arch_triples, mega, judge_map, reading_path,
+            concept_graph, landmarks, field_map_style="__slot__",
+        )
+        outline_md = "\n".join(_render_field_outline(mega))
+        mermaid_src = mega.mermaid_diagram or f"mindmap\n  root(({topic.title()}))"
+
+        html = _build_html_report(topic, body_md, outline_md, mermaid_src)
+        path = self._topic_dir(topic) / "report.html"
+        path.write_text(html, encoding="utf-8")
+        logger.info("HTML report exported: %s", path)
         return path
 
     def export_concept_graph_json(
@@ -649,6 +667,138 @@ def _paper_anchor(sp: ScoredPaper) -> str:
     return f"{slug}-{year}"
 
 
+def _build_report_markdown(
+    topic: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+    mega: FieldMegaArchitecture,
+    judge_map: dict[str, JudgeResult] | None,
+    reading_path: "ReadingPath | None",
+    concept_graph: "ConceptGraph | None",
+    landmarks: "list[LandmarkPaper] | None",
+    field_map_style: str,
+) -> str:
+    """Assemble the full report markdown (shared by the .md and .html exports)."""
+    show_concept_graph = bool(concept_graph and not concept_graph.extraction_failed)
+    lines: list[str] = []
+    lines += _render_part1_field_architecture(
+        topic, mega, arch_triples,
+        has_landmarks=bool(landmarks),
+        has_concept_graph=show_concept_graph,
+        field_map_style=field_map_style,
+    )
+    lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
+    if landmarks:
+        lines += _render_landmark_papers(landmarks)
+    if show_concept_graph:
+        lines += _render_part3_concept_graph(concept_graph)
+    lines += _render_part4_paper_cards(arch_triples, judge_map)
+    return "\n".join(lines)
+
+
+# Self-contained HTML report. marked.js renders the Markdown, mermaid.js renders
+# diagrams, and the Field Map slot gets clickable Outline/Diagram tabs.
+# Only __TITLE__/__REPORT_MD__/__OUTLINE_MD__/__MERMAID_SRC__ are substituted.
+_HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ — Survey Report</title>
+<style>
+  :root{ --fg:#1f2937; --muted:#6b7280; --border:#e5e7eb; --accent:#2563eb; }
+  *{box-sizing:border-box}
+  body{max-width:920px;margin:0 auto;padding:2.5rem 1.5rem 6rem;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       line-height:1.65;color:var(--fg);}
+  h1{font-size:1.9rem} h2{font-size:1.5rem;border-bottom:2px solid var(--border);padding-bottom:.3rem;margin-top:2.2rem}
+  h3{font-size:1.2rem;margin-top:1.8rem} h4{font-size:1.05rem}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.92rem}
+  th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:#f9fafb}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:.88em}
+  pre{background:#f6f8fa;padding:.8rem;border-radius:8px;overflow:auto}
+  blockquote{border-left:3px solid #d1d5db;margin:.6rem 0;padding:.2rem .9rem;color:var(--muted)}
+  hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
+  .fm-tabs{display:flex;gap:.5rem;margin:.6rem 0 1rem}
+  .fm-tabs button{font-size:.9rem;padding:.35rem .9rem;border:1px solid var(--border);
+                  border-radius:8px;background:#fff;color:#374151;cursor:pointer}
+  .fm-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .mermaid{background:#fff;text-align:center;overflow:auto}
+  .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
+          border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
+          padding:.55rem 1.5rem;font-size:.8rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="topbar">📄 Interactive report — use the buttons under <b>Field Map</b> to switch between outline and diagram.</div>
+<div id="content">Loading…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+const REPORT_MD   = __REPORT_MD__;
+const OUTLINE_MD  = __OUTLINE_MD__;
+const MERMAID_SRC = __MERMAID_SRC__;
+
+mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
+
+// 1. render the report markdown
+document.getElementById("content").innerHTML = marked.parse(REPORT_MD);
+
+// 2. convert ```mermaid code blocks into mermaid containers
+document.querySelectorAll("code.language-mermaid").forEach(function(c){
+  var d=document.createElement("pre"); d.className="mermaid"; d.textContent=c.textContent;
+  c.parentElement.replaceWith(d);
+});
+
+// 3. inject the Field Map outline/diagram tabs into the slot
+var slot=document.getElementById("fieldmap-slot");
+if(slot){
+  slot.innerHTML =
+    '<div class="fm-tabs">'+
+      '<button id="fm-b-outline" class="active" data-fm="outline">📋 Outline</button>'+
+      '<button id="fm-b-diagram" data-fm="diagram">📊 Diagram</button>'+
+    '</div>'+
+    '<div id="fm-v-outline">'+marked.parse(OUTLINE_MD)+'</div>'+
+    '<div id="fm-v-diagram" style="display:none"><pre class="mermaid">'+MERMAID_SRC+'</pre></div>';
+  slot.querySelectorAll(".fm-tabs button").forEach(function(b){
+    b.addEventListener("click", function(){ showFM(b.dataset.fm); });
+  });
+}
+
+// 4. render all mermaid diagrams (hidden ones still render; just not shown)
+mermaid.run();
+
+function showFM(which){
+  document.getElementById("fm-v-outline").style.display = which==="outline"?"":"none";
+  document.getElementById("fm-v-diagram").style.display = which==="diagram"?"":"none";
+  document.getElementById("fm-b-outline").classList.toggle("active", which==="outline");
+  document.getElementById("fm-b-diagram").classList.toggle("active", which==="diagram");
+}
+</script>
+</body>
+</html>
+"""
+
+
+def _build_html_report(
+    topic: str, body_md: str, outline_md: str, mermaid_src: str
+) -> str:
+    """Fill the HTML template, JSON-encoding the strings for safe embedding."""
+    def js(s: str) -> str:
+        # JSON-encode, then neutralise any "</" so it can't close the <script>
+        return json.dumps(s).replace("</", "<\\/")
+
+    return (
+        _HTML_REPORT_TEMPLATE
+        .replace("__TITLE__", topic.title())
+        .replace("__REPORT_MD__", js(body_md))
+        .replace("__OUTLINE_MD__", js(outline_md))
+        .replace("__MERMAID_SRC__", js(mermaid_src))
+    )
+
+
 def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
     """
     Field Map as a directory-style nested outline (instead of a Mermaid
@@ -776,7 +926,8 @@ def _render_part1_field_architecture(
         )
     lines.append("")
 
-    # Field Map — diagram (Mermaid), outline (directory-style list), or both
+    # Field Map — diagram (Mermaid), outline (directory-style list), both, or
+    # "__slot__" (HTML export injects interactive outline/diagram tabs here).
     lines += ["---", "", "### Field Map", ""]
     style = (field_map_style or "outline").lower()
     mermaid_block = [
@@ -785,7 +936,9 @@ def _render_part1_field_architecture(
         "```",
         "",
     ]
-    if style == "diagram":
+    if style == "__slot__":
+        lines += ['<div id="fieldmap-slot"></div>', ""]
+    elif style == "diagram":
         lines += mermaid_block
     elif style == "both":
         lines += mermaid_block
