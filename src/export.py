@@ -739,8 +739,7 @@ def _render_part1_field_architecture(
             prob = cp.get("problem", "")
             cnt = cp.get("coverage_count", "—")
             best_p = cp.get("best_paper", "—")
-            anchor_match = _find_paper_anchor(best_p, arch_triples)
-            best_link = f"[{best_p}](#{anchor_match})" if anchor_match else best_p
+            best_link = _paper_ref(best_p, arch_triples)
             coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
             lines.append(f"| {prob} | {coverage} | {best_link} |")
     else:
@@ -762,12 +761,7 @@ def _render_part1_field_architecture(
             if gap.gap_type:
                 lines.append(f"**Type:** {gap.gap_type}")
             if gap.evidence:
-                evidence_links = []
-                for title in gap.evidence:
-                    anchor_match = _find_paper_anchor(title, arch_triples)
-                    evidence_links.append(
-                        f"[{title}](#{anchor_match})" if anchor_match else title
-                    )
+                evidence_links = [_paper_ref(title, arch_triples) for title in gap.evidence]
                 lines.append(f"**Evidence:** {' · '.join(evidence_links)}")
             lines.append("")
             lines.append("---")
@@ -834,7 +828,7 @@ def _papers_for_area(
     for _, _, sp in scored[:max_papers]:
         a = _paper_anchor(sp)
         cit = f" ({sp.paper.citation_count:,}✱)" if sp.paper.citation_count else ""
-        links.append(f"[{_short_title(sp.paper.title)}](#{a}){cit}")
+        links.append(f"[{sp.paper.title}](#{a}){cit}")
     return links
 
 
@@ -917,7 +911,7 @@ def _render_research_landscape(
                     p = sp.paper
                     year_str = str(p.year) if p.year else "n.d."
                     cit_str = f"{p.citation_count:,} citations" if p.citation_count else "no citation data"
-                    label = f"{_short_title(p.title)} ({year_str}, {cit_str})"
+                    label = f"{p.title} ({year_str}, {cit_str})"
                     papers_using.append(f"[{label}](#{a})")
 
             # Render as a compact definition-style block
@@ -987,16 +981,12 @@ def _render_part2_survey_navigator(
         for item in cmp.complementary_coverage[:8]:
             aspect = item.get("aspect", "")
             best = item.get("best_covered_by", "")
-            a = _find_paper_anchor(best, arch_triples)
-            link = f"[{best}](#{a})" if a else best
-            lines.append(f"| {aspect} | {link} |")
+            lines.append(f"| {aspect} | {_paper_ref(best, arch_triples)} |")
         if cmp.best_overall_structure:
-            a = _find_paper_anchor(cmp.best_overall_structure, arch_triples)
-            link = (
-                f"[{cmp.best_overall_structure}](#{a})"
-                if a else cmp.best_overall_structure
+            lines.append(
+                f"| Best overall structure | "
+                f"{_paper_ref(cmp.best_overall_structure, arch_triples)} |"
             )
-            lines.append(f"| Best overall structure | {link} |")
         lines.append("")
 
     # Reading path (LLM-generated sequenced reading plan)
@@ -1008,11 +998,9 @@ def _render_part2_survey_navigator(
         lines.append("| Step | Paper | Why | Focus | Est. time |")
         lines.append("|---|---|---|---|---|")
         for step in reading_path.steps:
-            a = _find_paper_anchor(step.paper_title, arch_triples)
-            title_link = (
-                f"[{_short_title(step.paper_title)}](#{a})" if a
-                else _short_title(step.paper_title)
-            )
+            # Full real title + link to the paper card (falls back to the
+            # step's own title text, un-truncated, if no confident match)
+            title_link = _paper_ref(step.paper_title, arch_triples)
             focus = ", ".join(step.focus_sections[:3]) if step.focus_sections else "—"
             time_str = step.estimated_reading_time or "—"
             rationale = step.rationale.replace("|", "\\|")
@@ -1734,20 +1722,19 @@ def _title_signature(text: str) -> str:
     return " ".join(w for w in words if w not in _TITLE_STOPWORDS and len(w) > 1)
 
 
-def _find_paper_anchor(
+def _find_paper(
     title_fragment: str,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
-) -> str:
+) -> "ScoredPaper | None":
     """
-    Find the anchor of the paper whose title best matches `title_fragment`.
+    Return the ScoredPaper whose title best matches `title_fragment`, or None.
 
-    Returns "" when there is no confident match.  Matching is done on the
-    *significant* words of the title (generic survey words removed) using
-    rapidfuzz, and a disambiguation margin is required so an ambiguous
-    fragment links to NOTHING rather than to a plausible-but-wrong paper.
+    Matching is done on the *significant* words of the title (generic survey
+    words removed) using rapidfuzz, with a disambiguation margin so an ambiguous
+    fragment matches NOTHING rather than a plausible-but-wrong paper.
     """
     if not title_fragment:
-        return ""
+        return None
 
     frag_lower = title_fragment.lower().strip()
 
@@ -1756,27 +1743,50 @@ def _find_paper_anchor(
         t = sp.paper.title.lower()
         if frag_lower == t or (len(frag_lower) > 15 and frag_lower in t) \
            or (len(t) > 15 and t in frag_lower):
-            return _paper_anchor(sp)
+            return sp
 
     # 2. Fuzzy match on significant words, with a disambiguation margin
     from rapidfuzz import fuzz
     frag_sig = _title_signature(title_fragment)
     if not frag_sig:
-        return ""
+        return None
 
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, ScoredPaper]] = []
     for sp, _, _ in arch_triples:
         score = fuzz.token_set_ratio(frag_sig, _title_signature(sp.paper.title))
-        scored.append((score, _paper_anchor(sp)))
+        scored.append((score, sp))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_anchor = scored[0]
+    best_score, best_sp = scored[0]
     second_score = scored[1][0] if len(scored) > 1 else 0.0
 
-    # Require a decent absolute score AND a clear lead over the runner-up.
     if best_score >= 70 and (best_score - second_score) >= 15:
-        return best_anchor
-    return ""
+        return best_sp
+    return None
+
+
+def _find_paper_anchor(
+    title_fragment: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+) -> str:
+    """Anchor of the best-matching paper card, or "" if no confident match."""
+    sp = _find_paper(title_fragment, arch_triples)
+    return _paper_anchor(sp) if sp else ""
+
+
+def _paper_ref(
+    title_query: str,
+    arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
+) -> str:
+    """
+    A Markdown link to the matching paper card, using the paper's FULL real
+    title (so titles are never confusingly truncated or paraphrased). Falls
+    back to the given text (no link) when there is no confident match.
+    """
+    sp = _find_paper(title_query, arch_triples)
+    if sp:
+        return f"[{sp.paper.title}](#{_paper_anchor(sp)})"
+    return title_query or ""
 
 
 def _short_title(title: str, max_words: int = 5) -> str:

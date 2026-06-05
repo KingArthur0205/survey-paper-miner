@@ -206,7 +206,12 @@ class MegaArchitectSynthesizer:
                 raw = _strip_fences(resp.content[0].text)
                 data = json.loads(raw)
                 mega = _build_mega_architecture(topic, valid, comparison, data)
-                mega.mermaid_diagram = _generate_mindmap(topic, mega, self._client)
+                # Build the Field Map PROGRAMMATICALLY from the structured
+                # mega-architecture fields (major_tasks, method_families,
+                # benchmarks, challenges, gaps, applications) — NOT via a free
+                # LLM call — so every node in the diagram is exactly the data
+                # shown in the report's tables (no rewording / invented nodes).
+                mega.mermaid_diagram = _render_data_mindmap(mega)
                 if attempt > 0:
                     logger.info(
                         "Synthesis succeeded for '%s' on attempt %d (max_tokens=%d)",
@@ -419,6 +424,54 @@ def _generate_mindmap(
             topic, exc,
         )
         return _render_mermaid(mega)
+
+
+def _render_data_mindmap(mega: FieldMegaArchitecture) -> str:
+    """
+    Build the Field Map `mindmap` directly from the structured mega-architecture
+    fields, so every node is exactly the data shown in the report's tables.
+
+    Branches (all sourced from the same data the report renders elsewhere):
+      Major Tasks       ← mega.major_tasks
+      Method Families   ← mega.method_families
+      Benchmarks        ← mega.datasets_and_benchmarks
+      Challenges        ← mega.challenges
+      Research Gaps     ← mega.open_gaps
+      Applications      ← mega.applications
+    """
+    def clean(text: object, max_len: int = 46) -> str:
+        # mindmap node text breaks on (){}[]"|#;<> — strip them and trim length
+        t = " ".join(str(text).split())
+        t = re.sub(r'[()\[\]{}"|#;<>]', "", t)
+        t = t.strip(" -—:")
+        return (t[: max_len - 1] + "…") if len(t) > max_len else (t or "—")
+
+    n = len(mega.source_papers)
+    low = max(1, round(n * 0.3))
+
+    lines = ["mindmap", f"  root(({clean(mega.topic, 32)}))"]
+
+    def branch(title: str, items: list, counts: dict | None = None) -> None:
+        items = [it for it in items if it]
+        if not items:
+            return
+        lines.append(f"    {title}")
+        for it in items[:6]:
+            warn = ""
+            if counts is not None:
+                info = counts.get(it)
+                cnt = info.get("coverage_count", 0) if isinstance(info, dict) else 0
+                warn = " ⚠️" if isinstance(cnt, int) and cnt < low else ""
+            lines.append(f"      {clean(it)}{warn}")
+
+    branch("Major Tasks", list(mega.major_tasks.keys()), mega.major_tasks)
+    branch("Method Families", list(mega.method_families.keys()), mega.method_families)
+    branch("Benchmarks", [d.get("name", "") for d in mega.datasets_and_benchmarks])
+    branch("Challenges", list(mega.challenges.keys()), mega.challenges)
+    branch("Research Gaps", [g.gap for g in mega.open_gaps])
+    branch("Applications", list(mega.applications))
+
+    return "\n".join(lines)
 
 
 def _render_mermaid(mega: FieldMegaArchitecture) -> str:
