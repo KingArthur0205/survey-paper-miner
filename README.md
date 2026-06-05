@@ -70,17 +70,52 @@ Outputs are written to `data/exports/<topics>_<date>/`.
 
 ```
 data/exports/computer-vision_2026-05-28/
-├── papers_ranked.xlsx          ← formatted workbook (ranked papers + summaries)
-├── papers_ranked.csv
-├── paper_summaries.jsonl
-├── survey_report.md            ← full Markdown report
+├── papers_ranked.xlsx          ← ranked papers + summaries (open in Excel)
 └── computer-vision/            ← per-topic sub-folder
-    ├── report.md               ← architecture report + reading guide
-    ├── mindmap.html            ← interactive concept mindmap
+    ├── report.md               ← THE MAIN REPORT (field map, reading path,
+    │                              concept graph, landmark papers, paper cards)
+    ├── mindmap.html            ← interactive mindmap (double-click → browser)
     ├── architecture.json       ← machine-readable mega-architecture
+    ├── architecture.mmd        ← Mermaid source of the field diagram
     ├── concept_graph.json      ← typed concept graph
     └── reading_path.json       ← sequenced newcomer reading list
 ```
+
+---
+
+## How to open the report (no Markdown experience needed)
+
+Each run produces three things you'll actually look at. Here they are, **easiest first**:
+
+| File | How to open | What it is |
+|---|---|---|
+| **`papers_ranked.xlsx`** | Double-click → opens in **Excel / Numbers / Google Sheets** | The ranked list of papers with summaries. Zero setup. |
+| **`mindmap.html`** | Double-click → opens in your **web browser** | An interactive mind-map of the field. Zero setup, no internet needed. |
+| **`report.md`** | See below ↓ | The full report — field map, reading path, concept graph, landmark papers, and one card per paper. |
+
+### Why can't I just double-click `report.md`?
+
+`.md` (Markdown) is a **plain-text** format. If you double-click it, it opens in a text editor and you'll see raw symbols like `#`, `[link](...)`, and the diagrams will show up as code instead of pictures. You need a **Markdown viewer** to see it rendered (with diagrams and clickable links). Pick **any one** of these — all free, all show the diagrams and the click-to-jump links correctly:
+
+**Option A — VS Code (recommended, easiest)**
+1. Install [VS Code](https://code.visualstudio.com/) (free).
+2. Open `report.md` in it.
+3. Press **`Cmd+Shift+V`** (Mac) or **`Ctrl+Shift+V`** (Windows) to see the rendered preview.
+4. For the diagrams to appear, install the extension **"Markdown Preview Mermaid Support"** once: click the Extensions icon on the left, search that name, click *Install*. Done — reopen the preview.
+
+**Option B — Obsidian (best reading experience)**
+1. Install [Obsidian](https://obsidian.md/) (free).
+2. "Open folder as vault" → choose the report's folder.
+3. Click `report.md`. Diagrams **and** the internal jump-links (e.g. clicking a paper title jumps to its card) work out of the box.
+
+**Option C — GitHub (nothing to install)**
+Upload the report folder to any GitHub repository and open `report.md` on the website — GitHub renders the Mermaid diagrams automatically.
+
+### Want to share it with someone non-technical?
+
+Turn it into a **PDF**: in VS Code, install the **"Markdown PDF"** extension, then right-click the report → *"Markdown PDF: Export (pdf)"*. You get a normal PDF anyone can open.
+
+> 💡 In short: for a quick look, open **`mindmap.html`** (browser) and **`papers_ranked.xlsx`** (Excel). For the full report, open **`report.md`** in **VS Code** or **Obsidian**.
 
 ---
 
