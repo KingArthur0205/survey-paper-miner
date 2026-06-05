@@ -737,6 +737,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .ft-item:hover{background:#f3f4f6}
   .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600}
   .ft-item.dim{opacity:.32}
+  .ft-item.hidden{display:none}
   .ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
   .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
           border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
@@ -798,7 +799,7 @@ function renderLinkedTree(slotId, TREE){
   pairs.forEach(function(p,i){
     tabs+='<button class="ft-pair'+(i===0?" active":"")+'" data-i="'+i+'">'+esc(p.leftLabel)+" ↔ "+esc(p.rightLabel)+"</button>";
   });
-  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click any item on either side to highlight what it connects to.</p>';
+  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click an item to show only what it connects to — unrelated nodes hide. Click it again to bring them all back.</p>';
   slot.innerHTML=tabs;
   slot.querySelectorAll(".ft-pair").forEach(function(b){
     b.addEventListener("click",function(){
@@ -819,25 +820,35 @@ function renderLinkedTree(slotId, TREE){
       rights.map(function(r,i){return '<div class="ft-item" data-side="R" data-id="'+i+'">'+esc(r)+'</div>';}).join("")+
       '</div></div>';
     var view=slot.querySelector(".ft-view"); view.innerHTML=html;
-    function clear(){view.querySelectorAll(".ft-item").forEach(function(e){e.classList.remove("active","dim");});}
-    view.querySelectorAll('.ft-item[data-side=L]').forEach(function(el,i){
-      el.addEventListener("click",function(){
-        clear(); el.classList.add("active");
-        var rel=links[lefts[i]]||[];
-        view.querySelectorAll('.ft-item[data-side=R]').forEach(function(re,ri){
-          if(rel.indexOf(rights[ri])>=0)re.classList.add("active"); else re.classList.add("dim");});
-        view.querySelectorAll('.ft-item[data-side=L]').forEach(function(le,li){if(li!==i)le.classList.add("dim");});
-      });
-    });
-    view.querySelectorAll('.ft-item[data-side=R]').forEach(function(el,i){
-      el.addEventListener("click",function(){
-        clear(); el.classList.add("active");
-        var rel=rev[rights[i]]||[];
-        view.querySelectorAll('.ft-item[data-side=L]').forEach(function(le,li){
-          if(rel.indexOf(lefts[li])>=0)le.classList.add("active"); else le.classList.add("dim");});
-        view.querySelectorAll('.ft-item[data-side=R]').forEach(function(re,ri){if(ri!==i)re.classList.add("dim");});
-      });
-    });
+    var L=view.querySelectorAll('.ft-item[data-side=L]');
+    var R=view.querySelectorAll('.ft-item[data-side=R]');
+    var sel=null;                 // {s:'L'|'R', i:int} — currently focused item
+    function reset(){
+      L.forEach(function(e){e.classList.remove("active","dim","hidden");});
+      R.forEach(function(e){e.classList.remove("active","dim","hidden");});
+    }
+    // Focusing an item HIDES the unrelated nodes in the adjacent column (so the
+    // list stays short and readable) and dims the other items on its own side.
+    function focusL(i){
+      reset(); L[i].classList.add("active");
+      var rel=links[lefts[i]]||[];
+      R.forEach(function(re,ri){ if(rel.indexOf(rights[ri])<0) re.classList.add("hidden"); });
+      L.forEach(function(le,li){ if(li!==i) le.classList.add("dim"); });
+    }
+    function focusR(i){
+      reset(); R[i].classList.add("active");
+      var rel=rev[rights[i]]||[];
+      L.forEach(function(le,li){ if(rel.indexOf(lefts[li])<0) le.classList.add("hidden"); });
+      R.forEach(function(re,ri){ if(ri!==i) re.classList.add("dim"); });
+    }
+    L.forEach(function(el,i){ el.addEventListener("click",function(){
+      if(sel&&sel.s==='L'&&sel.i===i){ reset(); sel=null; }   // re-click → restore all
+      else { focusL(i); sel={s:'L',i:i}; }
+    });});
+    R.forEach(function(el,i){ el.addEventListener("click",function(){
+      if(sel&&sel.s==='R'&&sel.i===i){ reset(); sel=null; }
+      else { focusR(i); sel={s:'R',i:i}; }
+    });});
   }
 }
 renderLinkedTree("fieldtree-slot", FIELD_TREE);
