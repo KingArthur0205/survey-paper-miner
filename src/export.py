@@ -972,41 +972,76 @@ def _field_tree_pairs(
     return task_method, method_tech
 
 
+def _field_tree_background(mega: FieldMegaArchitecture) -> list[str]:
+    """Background drivers = the field's core problems (the '-1' tree level)."""
+    return [
+        str(cp.get("problem", "")).strip()
+        for cp in mega.core_problems
+        if isinstance(cp, dict) and str(cp.get("problem", "")).strip()
+    ][:8]
+
+
 def _render_field_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
-    """Static (Markdown) Field Tree: nested list, area → method → techniques."""
+    """
+    Static (Markdown) Field Tree — the full 5-level problem-solving chain:
+        Background → Topic → Research Area → Method → Representative Technique
+    """
     task_method, method_tech = _field_tree_pairs(mega)
+    bg = _field_tree_background(mega)
     out: list[str] = []
+
+    if bg:
+        out.append("- **Background** *(drivers — many converge onto the topic)*")
+        for b in bg:
+            out.append(f"  - {b}")
+    out.append(f"- **{mega.topic}** *(the topic these drivers motivate)*")
 
     if task_method:
         for task, methods in task_method.items():
-            out.append(f"- **{task}**")
+            out.append(f"  - **{task}** *(research area)*")
             for m in methods:
                 techs = method_tech.get(m, [])
                 tail = f" — {', '.join(techs[:5])}" if techs else ""
-                out.append(f"  - {m}{tail}")
+                out.append(f"    - {m}{tail}")
     elif method_tech:  # fallback: no task→method links, just method → techniques
         for m, techs in method_tech.items():
-            out.append(f"- **{m}**" + (f" — {', '.join(techs[:5])}" if techs else ""))
+            out.append(f"  - {m}" + (f" — {', '.join(techs[:5])}" if techs else ""))
 
     return out
 
 
 def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
-    """JSON-able data for the interactive (HTML) two-column linked view."""
+    """
+    JSON-able data for the interactive (HTML) two-column linked view, covering
+    every adjacent layer of the 5-level chain:
+        Background ↔ Topic ↔ Research Areas ↔ Methods ↔ Techniques
+    """
     task_method, method_tech = _field_tree_pairs(mega)
-    pairs = []
+    topic = mega.topic
+    bg = _field_tree_background(mega)
+
+    def short(s: str, n: int = 64) -> str:
+        return (s[: n - 1] + "…") if len(s) > n else s
+
+    pairs: list[dict] = []
+    bg_short = [short(b) for b in bg]
+    if bg_short:
+        pairs.append({
+            "key": "bg-topic", "leftLabel": "Background", "rightLabel": "Topic",
+            "links": {b: [topic] for b in bg_short},
+        })
     if task_method:
         pairs.append({
-            "key": "task-method",
-            "leftLabel": "Research Areas",
-            "rightLabel": "Methods",
+            "key": "topic-area", "leftLabel": "Topic", "rightLabel": "Research Areas",
+            "links": {topic: list(task_method.keys())},
+        })
+        pairs.append({
+            "key": "task-method", "leftLabel": "Research Areas", "rightLabel": "Methods",
             "links": task_method,
         })
     if method_tech:
         pairs.append({
-            "key": "method-technique",
-            "leftLabel": "Methods",
-            "rightLabel": "Techniques",
+            "key": "method-technique", "leftLabel": "Methods", "rightLabel": "Techniques",
             "links": method_tech,
         })
     return {"pairs": pairs}
@@ -1112,7 +1147,9 @@ def _render_part1_field_architecture(
         "",
         "### Field Tree",
         "",
-        "> The problem-solving chain: **research area → method → representative technique**.",
+        "> The problem-solving chain: **Background → Topic → Research Area → Method → "
+        "Representative Technique**. (Background drivers converge onto the topic; the "
+        "topic unfolds into research areas, methods, and techniques.)",
         "",
     ]
     if style == "__slot__":
