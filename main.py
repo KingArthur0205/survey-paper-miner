@@ -48,10 +48,18 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
-# Load .env before any module that reads environment variables
+# Load .env before any module that reads environment variables.
+# load_dotenv() defaults to override=False, so a variable already present in the
+# shell environment wins over .env — even when it's an EMPTY string. That makes
+# an exported `ANTHROPIC_API_KEY=` silently disable every LLM pass while CORE/S2
+# (which aren't pre-set) still load. To be robust, let .env fill in any key the
+# environment is missing OR has blank, without clobbering a real exported value.
 load_dotenv()
+for _k, _v in (dotenv_values() or {}).items():
+    if _v and not os.environ.get(_k):
+        os.environ[_k] = _v
 
 from src.config import load_config, AppConfig
 from src.query_builder import build_queries, SearchQuery
