@@ -78,6 +78,7 @@ _SYNTH_SCHEMA = """
     "<task name>": {
       "description": "one sentence",
       "subtasks": ["...", "..."],
+      "methods": ["<method-family name this task uses>", "..."],
       "coverage_count": 4
     }
   },
@@ -122,6 +123,9 @@ _SYNTH_SYSTEM = (
     "Given multiple per-paper architecture summaries for one research field, "
     "synthesise them into a single unified field architecture. "
     "coverage_count fields should reflect how many of the input papers cover each element. "
+    "For each major_task, the 'methods' list must contain method-family names that "
+    "EXACTLY match keys in method_families — these encode which methods each research "
+    "area uses (a method may appear under several tasks). "
     "open_gaps should identify topics that are underrepresented or conceptually unresolved "
     "across the surveys. "
     "Return ONLY valid JSON matching the schema. "

@@ -82,7 +82,7 @@ data/exports/computer-vision_2026-05-28/
 ```
 
 The report comes in **two formats with the same content** — pick whichever you prefer:
-- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map has **📋 Outline / 📊 Diagram** buttons you can toggle.
+- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map has **📋 Outline / 📊 Diagram** buttons, and the **Field Tree** lets you click a research area or method to highlight what it links to.
 - **`report.md`** — the Markdown version, best if you read in GitHub / VS Code / Obsidian.
 
 ---

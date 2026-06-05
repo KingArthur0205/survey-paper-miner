@@ -337,8 +337,9 @@ class Exporter:
         )
         outline_md = "\n".join(_render_field_outline(mega))
         mermaid_src = mega.mermaid_diagram or f"mindmap\n  root(({topic.title()}))"
+        field_tree = _field_tree_html_data(mega)
 
-        html = _build_html_report(topic, body_md, outline_md, mermaid_src)
+        html = _build_html_report(topic, body_md, outline_md, mermaid_src, field_tree)
         path = self._topic_dir(topic) / "report.html"
         path.write_text(html, encoding="utf-8")
         logger.info("HTML report exported: %s", path)
@@ -725,6 +726,15 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
                   border-radius:8px;background:#fff;color:#374151;cursor:pointer}
   .fm-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
   .mermaid{background:#fff;text-align:center;overflow:auto}
+  .ft-cols{display:flex;gap:1.25rem;flex-wrap:wrap}
+  .ft-col{flex:1;min-width:240px;border:1px solid var(--border);border-radius:8px;padding:.5rem}
+  .ft-h{font-weight:600;font-size:.78rem;color:var(--muted);margin:.1rem 0 .5rem;
+        text-transform:uppercase;letter-spacing:.05em}
+  .ft-item{padding:.4rem .6rem;border-radius:6px;cursor:pointer;font-size:.92rem;margin:2px 0}
+  .ft-item:hover{background:#f3f4f6}
+  .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600}
+  .ft-item.dim{opacity:.32}
+  #ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
   .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
           border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
           padding:.55rem 1.5rem;font-size:.8rem;color:var(--muted)}
@@ -740,6 +750,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 const REPORT_MD   = __REPORT_MD__;
 const OUTLINE_MD  = __OUTLINE_MD__;
 const MERMAID_SRC = __MERMAID_SRC__;
+const FIELD_TREE  = __FIELD_TREE__;
 
 mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
 
@@ -770,6 +781,62 @@ if(slot){
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
 mermaid.run();
 
+// 5. Field Tree — interactive two-column linked view
+(function(){
+  var slot=document.getElementById("fieldtree-slot");
+  if(!slot || !FIELD_TREE.pairs || !FIELD_TREE.pairs.length){
+    if(slot) slot.innerHTML="<p style='color:#6b7280'>Not enough data to build the field tree.</p>";
+    return;
+  }
+  var pairs=FIELD_TREE.pairs;
+  function esc(s){var d=document.createElement("div");d.textContent=s;return d.innerHTML;}
+  var tabs='<div class="fm-tabs">';
+  pairs.forEach(function(p,i){
+    tabs+='<button class="ft-pair'+(i===0?" active":"")+'" data-i="'+i+'">'+esc(p.leftLabel)+" ↔ "+esc(p.rightLabel)+"</button>";
+  });
+  tabs+='</div><div id="ft-view"></div><p id="ft-hint">Click any item on either side to highlight what it connects to.</p>';
+  slot.innerHTML=tabs;
+  slot.querySelectorAll(".ft-pair").forEach(function(b){
+    b.addEventListener("click",function(){
+      slot.querySelectorAll(".ft-pair").forEach(function(x){x.classList.remove("active");});
+      b.classList.add("active"); drawPair(pairs[+b.dataset.i]);
+    });
+  });
+  drawPair(pairs[0]);
+
+  function drawPair(p){
+    var links=p.links, lefts=Object.keys(links), rights=[], rev={};
+    lefts.forEach(function(l){(links[l]||[]).forEach(function(r){if(rights.indexOf(r)<0)rights.push(r);});});
+    rights.forEach(function(r){rev[r]=[];});
+    lefts.forEach(function(l){(links[l]||[]).forEach(function(r){rev[r].push(l);});});
+    var html='<div class="ft-cols"><div class="ft-col"><div class="ft-h">'+esc(p.leftLabel)+'</div>'+
+      lefts.map(function(l,i){return '<div class="ft-item" data-side="L" data-id="'+i+'">'+esc(l)+'</div>';}).join("")+
+      '</div><div class="ft-col"><div class="ft-h">'+esc(p.rightLabel)+'</div>'+
+      rights.map(function(r,i){return '<div class="ft-item" data-side="R" data-id="'+i+'">'+esc(r)+'</div>';}).join("")+
+      '</div></div>';
+    var view=document.getElementById("ft-view"); view.innerHTML=html;
+    function clear(){view.querySelectorAll(".ft-item").forEach(function(e){e.classList.remove("active","dim");});}
+    view.querySelectorAll('.ft-item[data-side=L]').forEach(function(el,i){
+      el.addEventListener("click",function(){
+        clear(); el.classList.add("active");
+        var rel=links[lefts[i]]||[];
+        view.querySelectorAll('.ft-item[data-side=R]').forEach(function(re,ri){
+          if(rel.indexOf(rights[ri])>=0)re.classList.add("active"); else re.classList.add("dim");});
+        view.querySelectorAll('.ft-item[data-side=L]').forEach(function(le,li){if(li!==i)le.classList.add("dim");});
+      });
+    });
+    view.querySelectorAll('.ft-item[data-side=R]').forEach(function(el,i){
+      el.addEventListener("click",function(){
+        clear(); el.classList.add("active");
+        var rel=rev[rights[i]]||[];
+        view.querySelectorAll('.ft-item[data-side=L]').forEach(function(le,li){
+          if(rel.indexOf(lefts[li])>=0)le.classList.add("active"); else le.classList.add("dim");});
+        view.querySelectorAll('.ft-item[data-side=R]').forEach(function(re,ri){if(ri!==i)re.classList.add("dim");});
+      });
+    });
+  }
+})();
+
 function showFM(which){
   document.getElementById("fm-v-outline").style.display = which==="outline"?"":"none";
   document.getElementById("fm-v-diagram").style.display = which==="diagram"?"":"none";
@@ -783,7 +850,8 @@ function showFM(which){
 
 
 def _build_html_report(
-    topic: str, body_md: str, outline_md: str, mermaid_src: str
+    topic: str, body_md: str, outline_md: str, mermaid_src: str,
+    field_tree: dict | None = None,
 ) -> str:
     """Fill the HTML template, JSON-encoding the strings for safe embedding."""
     def js(s: str) -> str:
@@ -796,6 +864,7 @@ def _build_html_report(
         .replace("__REPORT_MD__", js(body_md))
         .replace("__OUTLINE_MD__", js(outline_md))
         .replace("__MERMAID_SRC__", js(mermaid_src))
+        .replace("__FIELD_TREE__", json.dumps(field_tree or {"pairs": []}).replace("</", "<\\/"))
     )
 
 
@@ -858,6 +927,91 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
     return out
 
 
+# ── Field Tree (problem-solving chain: research area → method → technique) ────
+
+def _field_tree_pairs(
+    mega: FieldMegaArchitecture,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """
+    Extract the two many-to-many relations behind the Field Tree:
+      task_method:   research-area name -> [method-family names]
+      method_tech:   method-family name -> [representative technique names]
+    Method names from the LLM are matched back to real method_families keys.
+    """
+    fam_names = list(mega.method_families.keys())
+    fam_lower = {f.lower(): f for f in fam_names}
+
+    def resolve_family(m: str) -> str | None:
+        ml = m.lower().strip()
+        if ml in fam_lower:
+            return fam_lower[ml]
+        for fl, fn in fam_lower.items():       # fuzzy: substring either way
+            if ml and (ml in fl or fl in ml):
+                return fn
+        return None
+
+    task_method: dict[str, list[str]] = {}
+    for task, info in mega.major_tasks.items():
+        if not isinstance(info, dict):
+            continue
+        ms: list[str] = []
+        for m in (info.get("methods") or []):
+            fam = resolve_family(str(m))
+            if fam and fam not in ms:
+                ms.append(fam)
+        if ms:
+            task_method[task] = ms
+
+    method_tech: dict[str, list[str]] = {}
+    for fam, info in mega.method_families.items():
+        if isinstance(info, dict):
+            techs = [str(t).strip() for t in (info.get("representative_methods") or []) if str(t).strip()]
+            if techs:
+                method_tech[fam] = techs[:6]
+
+    return task_method, method_tech
+
+
+def _render_field_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
+    """Static (Markdown) Field Tree: nested list, area → method → techniques."""
+    task_method, method_tech = _field_tree_pairs(mega)
+    out: list[str] = []
+
+    if task_method:
+        for task, methods in task_method.items():
+            out.append(f"- **{task}**")
+            for m in methods:
+                techs = method_tech.get(m, [])
+                tail = f" — {', '.join(techs[:5])}" if techs else ""
+                out.append(f"  - {m}{tail}")
+    elif method_tech:  # fallback: no task→method links, just method → techniques
+        for m, techs in method_tech.items():
+            out.append(f"- **{m}**" + (f" — {', '.join(techs[:5])}" if techs else ""))
+
+    return out
+
+
+def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
+    """JSON-able data for the interactive (HTML) two-column linked view."""
+    task_method, method_tech = _field_tree_pairs(mega)
+    pairs = []
+    if task_method:
+        pairs.append({
+            "key": "task-method",
+            "leftLabel": "Research Areas",
+            "rightLabel": "Methods",
+            "links": task_method,
+        })
+    if method_tech:
+        pairs.append({
+            "key": "method-technique",
+            "leftLabel": "Methods",
+            "rightLabel": "Techniques",
+            "links": method_tech,
+        })
+    return {"pairs": pairs}
+
+
 def _render_part1_field_architecture(
     topic: str,
     mega: FieldMegaArchitecture,
@@ -881,6 +1035,7 @@ def _render_part1_field_architecture(
         "- [Part 1 — Field Architecture](#part-1--field-architecture)",
         "  - [Field at a Glance](#field-at-a-glance)",
         "  - [Field Map](#field-map)",
+        "  - [Field Tree](#field-tree)",
         "  - [Core Problems](#core-problems)",
         "  - [Research Landscape](#research-landscape)",
         "  - [Research Gaps](#research-gaps)",
@@ -949,6 +1104,25 @@ def _render_part1_field_architecture(
         "",
         "> ⚠️ marks items covered by fewer than 30% of analysed surveys — likely research gaps.",
         "",
+    ]
+
+    # Field Tree — the problem-solving chain: research area → method → technique
+    lines += [
+        "---",
+        "",
+        "### Field Tree",
+        "",
+        "> The problem-solving chain: **research area → method → representative technique**.",
+        "",
+    ]
+    if style == "__slot__":
+        lines += ['<div id="fieldtree-slot"></div>', ""]
+    else:
+        tree = _render_field_tree_outline(mega)
+        lines += tree if tree else ["*Not enough data to build the field tree.*"]
+        lines.append("")
+
+    lines += [
         "---",
         "",
         "### Core Problems",
