@@ -795,7 +795,7 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   var holder=document.createElement("div"); holder.className="fmtree-d3";
   slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(holder);
 
-  var dx=34, dy=230, margin={top:22,right:230,bottom:22,left:170};
+  var dx=44, dy=250, margin={top:24,right:440,bottom:24,left:170};
   var root=d3.hierarchy(FIELD_MAP_TREE);
   root.x0=0; root.y0=0;
   root.descendants().forEach(function(d,i){
@@ -808,7 +808,7 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   var gLink=svg.append("g").attr("fill","none").attr("stroke","#cbd5e1").attr("stroke-width",1.5);
   var gNode=svg.append("g").attr("cursor","pointer").attr("pointer-events","all");
 
-  function trunc(s){ return s.length>52 ? s.slice(0,51)+"…" : s; }
+  function trunc(s){ return s.length>50 ? s.slice(0,49)+"…" : s; }
   function update(source){
     var nodes=root.descendants().reverse(), links=root.links();
     d3.tree().nodeSize([dx,dy])(root);
@@ -836,11 +836,11 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
           .attr("width",bb.width+2*px).attr("height",bb.height+2*py).attr("rx",8)
           .attr("fill",isRoot?"#2563eb":"#eff6ff")
           .attr("stroke",isRoot?"#1d4ed8":"#93c5fd").attr("stroke-width",1.5);
-      } else {                              // items → dot + text
+      } else {                              // items → dot + text, always to the right
         g.append("circle").attr("r",4.5)
           .attr("fill",d._children?"#2563eb":"#94a3b8").attr("stroke-width",10);
         g.append("text").attr("dy","0.31em")
-          .attr("x",d._children?-10:10).attr("text-anchor",d._children?"end":"start")
+          .attr("x",10).attr("text-anchor","start")
           .attr("font-size",15).attr("fill","#334155").text(trunc(d.data.label))
           .clone(true).lower().attr("stroke","white").attr("stroke-width",4);
       }
@@ -1155,12 +1155,10 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
     if mega.method_families:
         ch = []
         for name, info in list(mega.method_families.items())[:8]:
-            reps = [str(x) for x in (info.get("representative_methods") or [])][:5] \
+            reps = [str(x) for x in (info.get("representative_methods") or [])][:4] \
                 if isinstance(info, dict) else []
-            node: dict = {"label": f"{name}{cov(info)}"}
-            if reps:
-                node["children"] = [{"label": r} for r in reps]
-            ch.append(node)
+            tail = f" — {', '.join(reps)}" if reps else ""
+            ch.append({"label": f"{name}{cov(info)}{tail}"})
         cats.append({"label": "Method Families", "children": ch})
     benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
     if benches:
