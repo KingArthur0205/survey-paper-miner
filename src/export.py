@@ -980,6 +980,47 @@ def _build_html_report(
     )
 
 
+# ── Coverage-ordered views of the mega fields ───────────────────────────────
+# Both the Field Map and the report's Research Landscape iterate these, so the
+# two always show the SAME items in the SAME order: most-covered first.
+
+def _cov_key(info: object) -> int:
+    """coverage_count for sorting; missing → -1 so it sorts last."""
+    if isinstance(info, dict):
+        c = info.get("coverage_count")
+        if isinstance(c, int):
+            return c
+    return -1
+
+
+def _tasks_by_coverage(mega: FieldMegaArchitecture) -> list[tuple[str, dict]]:
+    return sorted(
+        [(k, v) for k, v in mega.major_tasks.items() if isinstance(v, dict)],
+        key=lambda kv: _cov_key(kv[1]), reverse=True,
+    )
+
+
+def _methods_by_coverage(mega: FieldMegaArchitecture) -> list[tuple[str, dict]]:
+    return sorted(
+        [(k, v) for k, v in mega.method_families.items() if isinstance(v, dict)],
+        key=lambda kv: _cov_key(kv[1]), reverse=True,
+    )
+
+
+def _challenges_by_coverage(mega: FieldMegaArchitecture) -> list[tuple[str, dict]]:
+    return sorted(
+        [(k, v) for k, v in mega.challenges.items() if isinstance(v, dict)],
+        key=lambda kv: _cov_key(kv[1]), reverse=True,
+    )
+
+
+def _benchmarks_by_coverage(mega: FieldMegaArchitecture) -> list[dict]:
+    return sorted(
+        [d for d in mega.datasets_and_benchmarks if isinstance(d, dict) and d.get("name")],
+        key=_cov_key, reverse=True,
+    )
+
+
 def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
     """
     Field Map as a directory-style nested outline (instead of a Mermaid
@@ -999,41 +1040,40 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
 
     if mega.major_tasks:
         out.append("- **Major Tasks**")
-        for name, info in list(mega.major_tasks.items())[:8]:
+        for name, info in _tasks_by_coverage(mega):
             out.append(f"  - {name}{cov(info)}")
 
     if mega.method_families:
         out.append("- **Method Families**")
-        for name, info in list(mega.method_families.items())[:8]:
+        for name, info in _methods_by_coverage(mega):
             reps = ""
-            if isinstance(info, dict):
-                rm = [str(x) for x in (info.get("representative_methods") or [])][:4]
-                if rm:
-                    reps = f" — {', '.join(rm)}"
+            rm = [str(x) for x in (info.get("representative_methods") or [])][:4]
+            if rm:
+                reps = f" — {', '.join(rm)}"
             out.append(f"  - {name}{reps}{cov(info)}")
 
-    benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
+    benches = _benchmarks_by_coverage(mega)
     if benches:
         out.append("- **Benchmarks & Datasets**")
-        for b in benches[:8]:
-            out.append(f"  - {b}")
+        for d in benches:
+            out.append(f"  - {d.get('name', '')}{cov(d)}")
 
     if mega.challenges:
         out.append("- **Challenges**")
-        for name, info in list(mega.challenges.items())[:8]:
+        for name, info in _challenges_by_coverage(mega):
             sev = ""
-            if isinstance(info, dict) and str(info.get("severity", "")).strip():
+            if str(info.get("severity", "")).strip():
                 sev = f" `{str(info['severity']).strip()}`"
             out.append(f"  - {name}{sev}{cov(info)}")
 
     if mega.open_gaps:
         out.append("- **Research Gaps**")
-        for g in mega.open_gaps[:6]:
+        for g in mega.open_gaps:
             out.append(f"  - {g.gap}")
 
     if mega.applications:
         out.append("- **Applications**")
-        for a in mega.applications[:8]:
+        for a in mega.applications:
             out.append(f"  - {a}")
 
     return out
@@ -1101,33 +1141,31 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
     # Major Tasks
     category("Major Tasks", [
         (f"{name}{cov(info)}", [])
-        for name, info in list(mega.major_tasks.items())[:8]
+        for name, info in _tasks_by_coverage(mega)
     ])
     # Method Families — representative methods inline (matches the Outline)
     mf_items: list[tuple[str, list[str]]] = []
-    for name, info in list(mega.method_families.items())[:8]:
-        reps = []
-        if isinstance(info, dict):
-            reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
+    for name, info in _methods_by_coverage(mega):
+        reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
         tail = f" — {', '.join(reps)}" if reps else ""
         mf_items.append((f"{name}{cov(info)}{tail}", []))
     category("Method Families", mf_items, label_max=78)
     # Benchmarks & Datasets
     category("Benchmarks & Datasets", [
-        (d.get("name", ""), []) for d in mega.datasets_and_benchmarks if d.get("name")
-    ][:8])
+        (f"{d.get('name', '')}{cov(d)}", []) for d in _benchmarks_by_coverage(mega)
+    ])
     # Challenges
     ch_items: list[tuple[str, list[str]]] = []
-    for name, info in list(mega.challenges.items())[:8]:
+    for name, info in _challenges_by_coverage(mega):
         sev = ""
-        if isinstance(info, dict) and str(info.get("severity", "")).strip():
+        if str(info.get("severity", "")).strip():
             sev = f" ({str(info['severity']).strip()})"
         ch_items.append((f"{name}{sev}{cov(info)}", []))
     category("Challenges", ch_items)
     # Research Gaps
-    category("Research Gaps", [(g.gap, []) for g in mega.open_gaps[:6]])
+    category("Research Gaps", [(g.gap, []) for g in mega.open_gaps])
     # Applications
-    category("Applications", [(a, []) for a in mega.applications[:8]])
+    category("Applications", [(a, []) for a in mega.applications])
 
     if len(lines) <= 2:           # only ROOT, no categories
         return ""
@@ -1154,34 +1192,33 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
     if mega.major_tasks:
         cats.append({"label": "Major Tasks", "children": [
             {"label": f"{name}{cov(info)}"}
-            for name, info in list(mega.major_tasks.items())[:8]
+            for name, info in _tasks_by_coverage(mega)
         ]})
     if mega.method_families:
         ch = []
-        for name, info in list(mega.method_families.items())[:8]:
-            reps = [str(x) for x in (info.get("representative_methods") or [])][:4] \
-                if isinstance(info, dict) else []
+        for name, info in _methods_by_coverage(mega):
+            reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
             tail = f" — {', '.join(reps)}" if reps else ""
             ch.append({"label": f"{name}{cov(info)}{tail}"})
         cats.append({"label": "Method Families", "children": ch})
-    benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
+    benches = _benchmarks_by_coverage(mega)
     if benches:
         cats.append({"label": "Benchmarks & Datasets",
-                     "children": [{"label": b} for b in benches[:8]]})
+                     "children": [{"label": f"{d.get('name', '')}{cov(d)}"} for d in benches]})
     if mega.challenges:
         ch = []
-        for name, info in list(mega.challenges.items())[:8]:
+        for name, info in _challenges_by_coverage(mega):
             sev = ""
-            if isinstance(info, dict) and str(info.get("severity", "")).strip():
+            if str(info.get("severity", "")).strip():
                 sev = f" ({str(info['severity']).strip()})"
             ch.append({"label": f"{name}{sev}{cov(info)}"})
         cats.append({"label": "Challenges", "children": ch})
     if mega.open_gaps:
         cats.append({"label": "Research Gaps",
-                     "children": [{"label": g.gap} for g in mega.open_gaps[:6]]})
+                     "children": [{"label": g.gap} for g in mega.open_gaps]})
     if mega.applications:
         cats.append({"label": "Applications",
-                     "children": [{"label": a} for a in mega.applications[:8]]})
+                     "children": [{"label": a} for a in mega.applications]})
 
     return {"label": mega.topic.title(), "children": cats}
 
@@ -1697,9 +1734,7 @@ def _render_research_landscape(
         lines += ["#### Mainstream Research Areas", ""]
         lines.append("| Research Area | What it studies | Surveys | Key Papers |")
         lines.append("|---|---|---|---|")
-        for task_name, info in mega.major_tasks.items():
-            if not isinstance(info, dict):
-                continue
+        for task_name, info in _tasks_by_coverage(mega):
             desc = str(info.get("description", "—"))
             cnt = info.get("coverage_count", "—")
             coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
@@ -1724,9 +1759,7 @@ def _render_research_landscape(
         )
         lines.append("")
 
-        for fam_name, info in mega.method_families.items():
-            if not isinstance(info, dict):
-                continue
+        for fam_name, info in _methods_by_coverage(mega):
             desc = str(info.get("description", ""))
             rep_methods: list[str] = [str(x) for x in (info.get("representative_methods") or [])]
             cnt = info.get("coverage_count", "—")
@@ -1767,7 +1800,7 @@ def _render_research_landscape(
         lines += ["#### Key Benchmarks & Datasets", ""]
         lines.append("| Benchmark / Dataset | Research area | Surveys citing it |")
         lines.append("|---|---|---|")
-        for ds in mega.datasets_and_benchmarks:
+        for ds in _benchmarks_by_coverage(mega):
             name = ds.get("name", "")
             task = ds.get("task", "—")
             cnt = ds.get("coverage_count", "—")
@@ -1781,15 +1814,20 @@ def _render_research_landscape(
         lines += ["#### Open Challenges", ""]
         lines.append("| Challenge | Severity | Surveys | Description |")
         lines.append("|---|---|---|---|")
-        for name, info in mega.challenges.items():
-            if not isinstance(info, dict):
-                continue
+        for name, info in _challenges_by_coverage(mega):
             sev = str(info.get("severity", "—"))
             cnt = info.get("coverage_count", "—")
             desc = str(info.get("description", "—"))
             coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
             safe_desc = desc.replace("|", "\\|")
             lines.append(f"| **{name}** | {sev} | {coverage} | {safe_desc} |")
+        lines.append("")
+
+    # ── 5. Applications ──────────────────────────────────────────────────
+    if mega.applications:
+        lines += ["#### Applications", ""]
+        for a in mega.applications:
+            lines.append(f"- {a}")
         lines.append("")
 
     return lines
