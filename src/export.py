@@ -682,6 +682,7 @@ def _build_report_markdown(
 ) -> str:
     """Assemble the full report markdown (shared by the .md and .html exports)."""
     show_concept_graph = bool(concept_graph and not concept_graph.extraction_failed)
+    html_mode = field_map_style == "__slot__"   # the HTML export uses the slot signal
     lines: list[str] = []
     lines += _render_part1_field_architecture(
         topic, mega, arch_triples,
@@ -694,7 +695,7 @@ def _build_report_markdown(
         lines += _render_landmark_papers(landmarks)
     if show_concept_graph:
         lines += _render_part3_concept_graph(concept_graph)
-    lines += _render_part4_paper_cards(arch_triples, judge_map)
+    lines += _render_part4_paper_cards(arch_triples, judge_map, html_mode=html_mode)
     return "\n".join(lines)
 
 
@@ -739,15 +740,19 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .fmn-d1{background:#eff6ff;color:#1e3a8a;border-color:#93c5fd;font-weight:700;font-size:14.5px}
   .fmn-d2{background:#f8fafc;color:#334155;border-color:#e2e8f0;font-size:14px}
   .fm-hint{align-self:center;color:var(--muted);font-size:.8rem;margin-left:.3rem}
-  .ft-cols{display:flex;gap:1.25rem;flex-wrap:wrap}
-  .ft-col{flex:1;min-width:240px;border:1px solid var(--border);border-radius:8px;padding:.5rem}
-  .ft-h{font-weight:600;font-size:.78rem;color:var(--muted);margin:.1rem 0 .5rem;
+  .ft-view{position:relative;overflow-x:auto}
+  .ft-lines{position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:3}
+  .ft-line{fill:none;stroke:var(--accent);stroke-width:2;opacity:.85}
+  .ft-cols{display:flex;gap:5rem;flex-wrap:nowrap;position:relative;align-items:flex-start}
+  .ft-col{flex:1;min-width:240px}
+  .ft-h{font-weight:600;font-size:.78rem;color:var(--muted);margin:.1rem 0 .6rem;
         text-transform:uppercase;letter-spacing:.05em}
-  .ft-item{padding:.4rem .6rem;border-radius:6px;cursor:pointer;font-size:.92rem;margin:2px 0}
-  .ft-item:hover{background:#f3f4f6}
-  .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600}
-  .ft-item.dim{opacity:.32}
-  .ft-item.hidden{display:none}
+  .ft-item{position:relative;z-index:1;border:1px solid var(--border);background:#fff;
+           padding:.45rem .7rem;border-radius:8px;cursor:pointer;font-size:.9rem;
+           margin:.45rem 0;word-break:break-word;line-height:1.35}
+  .ft-item:hover{background:#f3f4f6;border-color:#93c5fd}
+  .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600;border-color:var(--accent)}
+  .ft-item.dim{opacity:.4}
   .ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
   .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
           border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
@@ -777,47 +782,34 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   c.parentElement.replaceWith(d);
 });
 
-// 3. Field Map — interactive D3 collapsible tree. The root + categories show
-//    first; click a node to expand/collapse its children. Scroll to pan, and
-//    the buttons expand/collapse everything.
-(function(){
-  var slot=document.getElementById("fieldmap-slot");
-  if(!slot) return;
-  if(!FIELD_MAP_TREE || !FIELD_MAP_TREE.children || !FIELD_MAP_TREE.children.length){
-    slot.innerHTML="<p style='color:#6b7280'>No field map data.</p>"; return;
-  }
-  if(typeof d3==="undefined"){          // CDN blocked → readable text fallback
-    slot.innerHTML="<pre style='white-space:pre-wrap'>"+
-      FIELD_MAP_TREE.children.map(function(c){
+// 3. Reusable interactive box-tree renderer (Field Map + per-paper taxonomies).
+//    Every node is an HTML box (foreignObject → wrapping div) — full text, no
+//    truncation, bold names via data.html. Click a node to expand/collapse.
+function renderBoxTree(holder, DATA, opts){
+  opts = opts || {};
+  var initialDepth = (opts.initialDepth==null ? 1 : opts.initialDepth);
+  if(!DATA || !DATA.children || !DATA.children.length){ holder.innerHTML="<p style='color:#6b7280'>—</p>"; return null; }
+  if(typeof d3==="undefined"){            // CDN blocked → readable text fallback
+    holder.innerHTML="<pre style='white-space:pre-wrap'>"+
+      DATA.children.map(function(c){
         return "• "+c.label+"\\n"+(c.children||[]).map(function(i){return "   – "+i.label;}).join("\\n");
       }).join("\\n")+"</pre>";
-    return;
+    return null;
   }
-  var bar=document.createElement("div"); bar.className="fm-tabs";
-  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button>'+
-                '<button id="fm-collapse">⊖ Collapse all</button>'+
-                '<span class="fm-hint">Click a node to expand / collapse · scroll to pan</span>';
-  var holder=document.createElement("div"); holder.className="fmtree-d3";
-  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(holder);
-
-  var MAXW=300, HGAP=48, VGAP=14;        // box max width, column gap, row gap
-  var root=d3.hierarchy(FIELD_MAP_TREE);
-  root.descendants().forEach(function(d,i){
-    d.id=i; d._children=d.children;
-    if(d.depth>=1) d.children=null;       // start with only the categories open
-  });
+  var MAXW=300, HGAP=48, VGAP=14;
+  var root=d3.hierarchy(DATA);
+  root.descendants().forEach(function(d,i){ d.id=i; d._children=d.children; if(d.depth>=initialDepth) d.children=null; });
   var svg=d3.create("svg");
   var gLink=svg.append("g").attr("fill","none").attr("stroke","#cbd5e1").attr("stroke-width",1.6);
   var gNode=svg.append("g");
   holder.appendChild(svg.node());
 
+  function escHtml(s){ var e=document.createElement("div"); e.textContent=s; return e.innerHTML; }
   function depthClass(d){ return "fmn fmn-d"+Math.min(d.depth,2); }
-  function labelText(d){ return (d._children?(d.children?"▾ ":"▸ "):"")+d.data.label; }
+  function nodeHtml(d){ var m=(d._children?(d.children?"▾ ":"▸ "):""); return escHtml(m)+(d.data.html?d.data.html:escHtml(d.data.label)); }
 
   function update(){
     var nodes=root.descendants(), links=root.links();
-
-    // every node is an HTML box (foreignObject → wrapping div), full text, no truncation
     var node=gNode.selectAll("g.fmn-g").data(nodes,function(d){return d.id;});
     node.exit().remove();
     var enter=node.enter().append("g").attr("class","fmn-g")
@@ -825,62 +817,49 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
     enter.append("foreignObject").append("xhtml:div");
     var all=enter.merge(node);
     all.style("cursor",function(d){return d._children?"pointer":"default";});
-    all.select("div").attr("class",depthClass).text(labelText);
-    // measure: natural width (capped at MAXW), then wrapped height at that width
+    all.select("div").attr("class",depthClass).html(nodeHtml);
     all.select("foreignObject").attr("width",MAXW).attr("height",4000);
-    all.each(function(d){
-      var div=this.querySelector("div");
-      div.style.width="";
-      d.bw=Math.min(MAXW, Math.ceil(div.getBoundingClientRect().width)+1);
-    });
-    all.each(function(d){
-      var fo=this.querySelector("foreignObject"), div=this.querySelector("div");
-      div.style.width=d.bw+"px";
-      d.bh=Math.ceil(div.getBoundingClientRect().height)+1;
-      fo.setAttribute("width",d.bw+2); fo.setAttribute("height",d.bh+2);
-    });
-
-    // columns by depth (each column as wide as its widest box); rows by leaf stacking
+    all.each(function(d){ var div=this.querySelector("div"); div.style.width=""; d.bw=Math.min(MAXW, Math.ceil(div.getBoundingClientRect().width)+1); });
+    all.each(function(d){ var fo=this.querySelector("foreignObject"), div=this.querySelector("div"); div.style.width=d.bw+"px"; d.bh=Math.ceil(div.getBoundingClientRect().height)+1; fo.setAttribute("width",d.bw+2); fo.setAttribute("height",d.bh+2); });
     var maxDepth=0; nodes.forEach(function(d){ if(d.depth>maxDepth)maxDepth=d.depth; });
     var colW=[],k; for(k=0;k<=maxDepth;k++){ var mw=0; nodes.forEach(function(d){ if(d.depth===k&&d.bw>mw)mw=d.bw; }); colW[k]=mw; }
     var colX=[0]; for(k=1;k<=maxDepth;k++){ colX[k]=colX[k-1]+colW[k-1]+HGAP; }
     var cur=0;
-    (function lay(d){
-      d.X=colX[d.depth];
-      if(d.children&&d.children.length){
-        d.children.forEach(lay);
-        d.Y=(d.children[0].Y+d.children[d.children.length-1].Y)/2;
-      } else { d.Y=cur+d.bh/2; cur+=d.bh+VGAP; }
-    })(root);
-
+    (function lay(d){ d.X=colX[d.depth]; if(d.children&&d.children.length){ d.children.forEach(lay); d.Y=(d.children[0].Y+d.children[d.children.length-1].Y)/2; } else { d.Y=cur+d.bh/2; cur+=d.bh+VGAP; } })(root);
     var t=svg.transition().duration(220);
     all.transition(t).attr("transform",function(d){ return "translate("+d.X+","+(d.Y-d.bh/2)+")"; });
     all.select("foreignObject").attr("x",0).attr("y",0);
-
-    // links: parent box right edge → child box left edge
-    function linkPath(d){
-      var sx=d.source.X+d.source.bw, sy=d.source.Y, tx=d.target.X, ty=d.target.Y, mx=(sx+tx)/2;
-      return "M"+sx+","+sy+"C"+mx+","+sy+" "+mx+","+ty+" "+tx+","+ty;
-    }
+    function linkPath(d){ var sx=d.source.X+d.source.bw, sy=d.source.Y, tx=d.target.X, ty=d.target.Y, mx=(sx+tx)/2; return "M"+sx+","+sy+"C"+mx+","+sy+" "+mx+","+ty+" "+tx+","+ty; }
     var link=gLink.selectAll("path").data(links,function(d){return d.target.id;});
     link.exit().remove();
     link.enter().append("path").merge(link).transition(t).attr("d",linkPath);
-
     var W=0,H=0; nodes.forEach(function(d){ if(d.X+d.bw>W)W=d.X+d.bw; if(d.Y+d.bh/2>H)H=d.Y+d.bh/2; });
     svg.attr("width",W+24).attr("height",H+24).attr("viewBox",[-12,-12,W+24,H+24]);
   }
   update();
+  function setAll(expand){ (function walk(d){ var kids=d._children; if(kids){ d.children = expand ? kids : (d.depth>=initialDepth?null:kids); kids.forEach(walk); } })(root); update(); }
+  return { expandAll:function(){setAll(true);}, collapseAll:function(){setAll(false);} };
+}
 
-  function setAll(expand){
-    (function walk(d){
-      var kids=d._children;
-      if(kids){ d.children = expand ? kids : (d.depth>=1?null:kids); kids.forEach(walk); }
-    })(root);
-    update();
-  }
-  bar.querySelector("#fm-expand").onclick=function(){ setAll(true); };
-  bar.querySelector("#fm-collapse").onclick=function(){ setAll(false); };
+// 3a. Field Map
+(function(){
+  var slot=document.getElementById("fieldmap-slot"); if(!slot) return;
+  var bar=document.createElement("div"); bar.className="fm-tabs";
+  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button>'+
+                '<button id="fm-collapse">⊖ Collapse all</button>'+
+                '<span class="fm-hint">Click a node to expand / collapse · scroll to pan</span>';
+  var holder=document.createElement("div"); holder.className="fmtree-d3";
+  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(holder);
+  var ctrl=renderBoxTree(holder, FIELD_MAP_TREE, {initialDepth:1});
+  if(ctrl){ bar.querySelector("#fm-expand").onclick=ctrl.expandAll; bar.querySelector("#fm-collapse").onclick=ctrl.collapseAll; }
 })();
+
+// 3b. Per-paper taxonomy trees — same interactive box tree (data in data-tax)
+document.querySelectorAll("div.taxtree").forEach(function(slot){
+  var data; try{ data=JSON.parse(slot.getAttribute("data-tax")); }catch(e){ return; }
+  slot.removeAttribute("data-tax"); slot.classList.add("fmtree-d3");
+  renderBoxTree(slot, data, {initialDepth:99});   // taxonomies are small → fully expanded
+});
 
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
 mermaid.run();
@@ -898,7 +877,7 @@ function renderLinkedTree(slotId, TREE){
   pairs.forEach(function(p,i){
     tabs+='<button class="ft-pair'+(i===0?" active":"")+'" data-i="'+i+'">'+esc(p.leftLabel)+" ↔ "+esc(p.rightLabel)+"</button>";
   });
-  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click an item to show only what it connects to — unrelated nodes hide. Click it again to bring them all back.</p>';
+  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click an item to draw lines to everything it connects to on the other side. Click it again to clear.</p>';
   slot.innerHTML=tabs;
   slot.querySelectorAll(".ft-pair").forEach(function(b){
     b.addEventListener("click",function(){
@@ -913,35 +892,56 @@ function renderLinkedTree(slotId, TREE){
     lefts.forEach(function(l){(links[l]||[]).forEach(function(r){if(rights.indexOf(r)<0)rights.push(r);});});
     rights.forEach(function(r){rev[r]=[];});
     lefts.forEach(function(l){(links[l]||[]).forEach(function(r){rev[r].push(l);});});
-    var html='<div class="ft-cols"><div class="ft-col"><div class="ft-h">'+esc(p.leftLabel)+'</div>'+
+    var html='<svg class="ft-lines"></svg><div class="ft-cols"><div class="ft-col"><div class="ft-h">'+esc(p.leftLabel)+'</div>'+
       lefts.map(function(l,i){return '<div class="ft-item" data-side="L" data-id="'+i+'">'+esc(l)+'</div>';}).join("")+
       '</div><div class="ft-col"><div class="ft-h">'+esc(p.rightLabel)+'</div>'+
       rights.map(function(r,i){return '<div class="ft-item" data-side="R" data-id="'+i+'">'+esc(r)+'</div>';}).join("")+
       '</div></div>';
     var view=slot.querySelector(".ft-view"); view.innerHTML=html;
+    var svg=view.querySelector(".ft-lines");
     var L=view.querySelectorAll('.ft-item[data-side=L]');
     var R=view.querySelectorAll('.ft-item[data-side=R]');
     var sel=null;                 // {s:'L'|'R', i:int} — currently focused item
+
+    function clearLines(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
     function reset(){
-      L.forEach(function(e){e.classList.remove("active","dim","hidden");});
-      R.forEach(function(e){e.classList.remove("active","dim","hidden");});
+      L.forEach(function(e){e.classList.remove("active","dim");});
+      R.forEach(function(e){e.classList.remove("active","dim");});
+      clearLines();
     }
-    // Focusing an item HIDES the unrelated nodes in the adjacent column (so the
-    // list stays short and readable) and dims the other items on its own side.
+    function line(aEl,bEl){      // a = left box (line from its right edge) → b = right box (left edge)
+      var vb=view.getBoundingClientRect(), ar=aEl.getBoundingClientRect(), br=bEl.getBoundingClientRect();
+      var x1=ar.right-vb.left+view.scrollLeft, y1=ar.top+ar.height/2-vb.top+view.scrollTop;
+      var x2=br.left -vb.left+view.scrollLeft, y2=br.top+br.height/2-vb.top+view.scrollTop;
+      var mx=(x1+x2)/2;
+      var pth=document.createElementNS("http://www.w3.org/2000/svg","path");
+      pth.setAttribute("class","ft-line");
+      pth.setAttribute("d","M"+x1+","+y1+"C"+mx+","+y1+" "+mx+","+y2+" "+x2+","+y2);
+      svg.appendChild(pth);
+    }
+    function sizeSvg(){ svg.setAttribute("width",view.scrollWidth); svg.setAttribute("height",view.scrollHeight); }
+    // Focusing an item highlights it + everything it connects to, dims the rest,
+    // and draws a connecting line to each connected item on the other side.
     function focusL(i){
-      reset(); L[i].classList.add("active");
+      reset(); sizeSvg(); L[i].classList.add("active");
       var rel=links[lefts[i]]||[];
-      R.forEach(function(re,ri){ if(rel.indexOf(rights[ri])<0) re.classList.add("hidden"); });
+      R.forEach(function(re,ri){
+        if(rel.indexOf(rights[ri])>=0){ re.classList.add("active"); line(L[i],re); }
+        else re.classList.add("dim");
+      });
       L.forEach(function(le,li){ if(li!==i) le.classList.add("dim"); });
     }
     function focusR(i){
-      reset(); R[i].classList.add("active");
+      reset(); sizeSvg(); R[i].classList.add("active");
       var rel=rev[rights[i]]||[];
-      L.forEach(function(le,li){ if(rel.indexOf(lefts[li])<0) le.classList.add("hidden"); });
+      L.forEach(function(le,li){
+        if(rel.indexOf(lefts[li])>=0){ le.classList.add("active"); line(le,R[i]); }
+        else le.classList.add("dim");
+      });
       R.forEach(function(re,ri){ if(ri!==i) re.classList.add("dim"); });
     }
     L.forEach(function(el,i){ el.addEventListener("click",function(){
-      if(sel&&sel.s==='L'&&sel.i===i){ reset(); sel=null; }   // re-click → restore all
+      if(sel&&sel.s==='L'&&sel.i===i){ reset(); sel=null; }   // re-click → clear
       else { focusL(i); sel={s:'L',i:i}; }
     });});
     R.forEach(function(el,i){ el.addEventListener("click",function(){
@@ -1052,12 +1052,6 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
                 reps = f" — {', '.join(rm)}"
             out.append(f"  - {name}{reps}{cov(info)}")
 
-    benches = _benchmarks_by_coverage(mega)
-    if benches:
-        out.append("- **Benchmarks & Datasets**")
-        for d in benches:
-            out.append(f"  - {d.get('name', '')}{cov(d)}")
-
     if mega.challenges:
         out.append("- **Challenges**")
         for name, info in _challenges_by_coverage(mega):
@@ -1065,6 +1059,12 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
             if str(info.get("severity", "")).strip():
                 sev = f" `{str(info['severity']).strip()}`"
             out.append(f"  - {name}{sev}{cov(info)}")
+
+    benches = _benchmarks_by_coverage(mega)
+    if benches:
+        out.append("- **Benchmarks & Datasets**")
+        for d in benches:
+            out.append(f"  - {d.get('name', '')}{cov(d)}")
 
     if mega.open_gaps:
         out.append("- **Research Gaps**")
@@ -1150,11 +1150,7 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
         tail = f" — {', '.join(reps)}" if reps else ""
         mf_items.append((f"{name}{cov(info)}{tail}", []))
     category("Method Families", mf_items, label_max=78)
-    # Benchmarks & Datasets
-    category("Benchmarks & Datasets", [
-        (f"{d.get('name', '')}{cov(d)}", []) for d in _benchmarks_by_coverage(mega)
-    ])
-    # Challenges
+    # Challenges (before Benchmarks per request)
     ch_items: list[tuple[str, list[str]]] = []
     for name, info in _challenges_by_coverage(mega):
         sev = ""
@@ -1162,6 +1158,10 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
             sev = f" ({str(info['severity']).strip()})"
         ch_items.append((f"{name}{sev}{cov(info)}", []))
     category("Challenges", ch_items)
+    # Benchmarks & Datasets
+    category("Benchmarks & Datasets", [
+        (f"{d.get('name', '')}{cov(d)}", []) for d in _benchmarks_by_coverage(mega)
+    ])
     # Research Gaps
     category("Research Gaps", [(g.gap, []) for g in mega.open_gaps])
     # Applications
@@ -1188,10 +1188,16 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
             return f" ({c}/{n})" + (" ⚠️" if c < low else "")
         return ""
 
+    def esc(s: object) -> str:
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def b(s: object) -> str:                       # bold a named term
+        return "<strong>" + esc(s) + "</strong>"
+
     cats: list[dict] = []
     if mega.major_tasks:
         cats.append({"label": "Major Tasks", "children": [
-            {"label": f"{name}{cov(info)}"}
+            {"label": f"{name}{cov(info)}", "html": b(name) + esc(cov(info))}
             for name, info in _tasks_by_coverage(mega)
         ]})
     if mega.method_families:
@@ -1199,26 +1205,33 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
         for name, info in _methods_by_coverage(mega):
             reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
             tail = f" — {', '.join(reps)}" if reps else ""
-            ch.append({"label": f"{name}{cov(info)}{tail}"})
+            html = b(name) + esc(cov(info))
+            if reps:
+                html += esc(" — ") + ", ".join(b(r) for r in reps)
+            ch.append({"label": f"{name}{cov(info)}{tail}", "html": html})
         cats.append({"label": "Method Families", "children": ch})
-    benches = _benchmarks_by_coverage(mega)
-    if benches:
-        cats.append({"label": "Benchmarks & Datasets",
-                     "children": [{"label": f"{d.get('name', '')}{cov(d)}"} for d in benches]})
+    # Challenges before Benchmarks (per request)
     if mega.challenges:
         ch = []
         for name, info in _challenges_by_coverage(mega):
             sev = ""
             if str(info.get("severity", "")).strip():
                 sev = f" ({str(info['severity']).strip()})"
-            ch.append({"label": f"{name}{sev}{cov(info)}"})
+            ch.append({"label": f"{name}{sev}{cov(info)}",
+                       "html": b(name) + esc(sev) + esc(cov(info))})
         cats.append({"label": "Challenges", "children": ch})
-    if mega.open_gaps:
+    benches = _benchmarks_by_coverage(mega)
+    if benches:
+        cats.append({"label": "Benchmarks & Datasets", "children": [
+            {"label": f"{d.get('name', '')}{cov(d)}", "html": b(d.get("name", "")) + esc(cov(d))}
+            for d in benches
+        ]})
+    if mega.open_gaps:                              # gaps are sentences → no bolding
         cats.append({"label": "Research Gaps",
                      "children": [{"label": g.gap} for g in mega.open_gaps]})
     if mega.applications:
         cats.append({"label": "Applications",
-                     "children": [{"label": a} for a in mega.applications]})
+                     "children": [{"label": a, "html": b(a)} for a in mega.applications]})
 
     return {"label": mega.topic.title(), "children": cats}
 
@@ -1314,17 +1327,13 @@ def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     """
     task_method, method_tech = _field_tree_pairs(mega)
     topic = mega.topic
-    bg = _field_tree_background(mega)
-
-    def short(s: str, n: int = 64) -> str:
-        return (s[: n - 1] + "…") if len(s) > n else s
+    bg = _field_tree_background(mega)        # full text — the linked view wraps boxes
 
     pairs: list[dict] = []
-    bg_short = [short(b) for b in bg]
-    if bg_short:
+    if bg:
         pairs.append({
             "key": "bg-topic", "leftLabel": "Background", "rightLabel": "Topic",
-            "links": {b: [topic] for b in bg_short},
+            "links": {b: [topic] for b in bg},
         })
     if task_method:
         pairs.append({
@@ -1442,19 +1451,16 @@ def _problem_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     """
     area_chal, chal_gap, free_gaps = _problem_tree_relations(mega)
 
-    def short(s: str, n: int = 80) -> str:
-        return (s[: n - 1] + "…") if len(s) > n else s
-
     pairs: list[dict] = []
     if area_chal:
         pairs.append({
             "key": "area-challenge", "leftLabel": "Research Areas",
             "rightLabel": "Challenges", "links": area_chal,
         })
-    if chal_gap or free_gaps:
-        links = {ch: [short(g) for g in gaps] for ch, gaps in chal_gap.items()}
+    if chal_gap or free_gaps:                # full gap text — boxes wrap
+        links = {ch: list(gaps) for ch, gaps in chal_gap.items()}
         if free_gaps:
-            links[_BLUESKY_LABEL] = [short(g) for g in free_gaps]
+            links[_BLUESKY_LABEL] = list(free_gaps)
         pairs.append({
             "key": "challenge-gap", "leftLabel": "Challenges",
             "rightLabel": "Research Gaps", "links": links,
@@ -1795,21 +1801,7 @@ def _render_research_landscape(
                     lines.append(f"- {ref}")
             lines.append("")
 
-    # ── 3. Key benchmarks & datasets ────────────────────────────────────
-    if mega.datasets_and_benchmarks:
-        lines += ["#### Key Benchmarks & Datasets", ""]
-        lines.append("| Benchmark / Dataset | Research area | Surveys citing it |")
-        lines.append("|---|---|---|")
-        for ds in _benchmarks_by_coverage(mega):
-            name = ds.get("name", "")
-            task = ds.get("task", "—")
-            cnt = ds.get("coverage_count", "—")
-            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
-            warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
-            lines.append(f"| **{name}**{warn} | {task} | {coverage} |")
-        lines.append("")
-
-    # ── 4. Open challenges ───────────────────────────────────────────────
+    # ── 3. Open challenges (before benchmarks, matching the Field Map) ────
     if mega.challenges:
         lines += ["#### Open Challenges", ""]
         lines.append("| Challenge | Severity | Surveys | Description |")
@@ -1821,6 +1813,20 @@ def _render_research_landscape(
             coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
             safe_desc = desc.replace("|", "\\|")
             lines.append(f"| **{name}** | {sev} | {coverage} | {safe_desc} |")
+        lines.append("")
+
+    # ── 4. Key benchmarks & datasets ────────────────────────────────────
+    if mega.datasets_and_benchmarks:
+        lines += ["#### Key Benchmarks & Datasets", ""]
+        lines.append("| Benchmark / Dataset | Research area | Surveys citing it |")
+        lines.append("|---|---|---|")
+        for ds in _benchmarks_by_coverage(mega):
+            name = ds.get("name", "")
+            task = ds.get("task", "—")
+            cnt = ds.get("coverage_count", "—")
+            coverage = f"{cnt} / {n}" if isinstance(cnt, int) else str(cnt)
+            warn = " ⚠️" if isinstance(cnt, int) and cnt < low_threshold else ""
+            lines.append(f"| **{name}**{warn} | {task} | {coverage} |")
         lines.append("")
 
     # ── 5. Applications ──────────────────────────────────────────────────
@@ -1887,6 +1893,7 @@ def _render_part2_survey_navigator(
 def _render_part4_paper_cards(
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
     judge_map: "dict[str, JudgeResult] | None" = None,
+    html_mode: bool = False,
 ) -> list[str]:
     lines: list[str] = [
         "---",
@@ -1958,16 +1965,25 @@ def _render_part4_paper_cards(
             lines.append(f"| Covers | {' · '.join(summary.taxonomy[:5])} |")
         lines.append("")
 
-        # Taxonomy tree — rendered as a Mermaid figure (not text-art)
+        # Taxonomy tree — interactive box tree in HTML, Mermaid figure in Markdown
         if arch.top_level_taxonomy:
             lines.append("**How this survey organises the field:**")
             lines.append("")
-            lines += _taxonomy_mermaid(
-                root_label=_short_title(p.title),
-                top_level=arch.top_level_taxonomy,
-                second_level=arch.second_level_taxonomy,
-                anchor=anchor,
-            )
+            if html_mode:
+                tree = _taxonomy_tree_data(
+                    _short_title(p.title),
+                    arch.top_level_taxonomy,
+                    arch.second_level_taxonomy,
+                )
+                payload = _html_attr(json.dumps(tree, ensure_ascii=False))
+                lines.append(f'<div class="taxtree" data-tax="{payload}"></div>')
+            else:
+                lines += _taxonomy_mermaid(
+                    root_label=_short_title(p.title),
+                    top_level=arch.top_level_taxonomy,
+                    second_level=arch.second_level_taxonomy,
+                    anchor=anchor,
+                )
             lines.append("")
 
         # Organizational logic — formatted as scannable bullets, not a wall of text
@@ -2765,3 +2781,27 @@ def _taxonomy_mermaid(
     out.append(f"    style {root_id} fill:#dbeafe,stroke:#2563eb,stroke-width:2px")
     out.append("```")
     return out
+
+
+def _html_attr(s: str) -> str:
+    """Escape a string for use inside a double-quoted HTML attribute."""
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _taxonomy_tree_data(
+    root_label: str,
+    top_level: list[str],
+    second_level: dict[str, list[str]],
+    max_top: int = 8,
+    max_sub: int = 6,
+) -> dict:
+    """A survey's taxonomy as nested {label, children} for the interactive tree."""
+    cats: list[dict] = []
+    for cat in top_level[:max_top]:
+        subs = [{"label": str(s)} for s in (second_level.get(cat, []) or [])[:max_sub]]
+        node: dict = {"label": str(cat)}
+        if subs:
+            node["children"] = subs
+        cats.append(node)
+    return {"label": root_label, "children": cats}
