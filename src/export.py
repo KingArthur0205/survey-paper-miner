@@ -729,20 +729,11 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
                   border-radius:8px;background:#fff;color:#374151;cursor:pointer}
   .fm-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
   .mermaid{background:#fff;text-align:center;overflow:auto}
-  /* Field Map collapsible tree */
-  .fmtree, .fmtree ul{list-style:none;margin:0;padding:0}
-  .fmtree ul{margin-left:1rem;border-left:1px solid var(--border);padding-left:.55rem}
-  .fmt-row{display:flex;align-items:flex-start;gap:.4rem;padding:.18rem .35rem;border-radius:6px}
-  .fmt-branch>.fmt-row{cursor:pointer}
-  .fmt-branch>.fmt-row:hover{background:#f3f4f6}
-  .fmt-tog{flex:none;width:1em;color:var(--muted);transition:transform .12s;margin-top:.05rem}
-  .fmt-item:not(.collapsed)>.fmt-row>.fmt-tog{transform:rotate(90deg)}
-  .fmt-dot{flex:none;color:#c4c8cf;margin-top:.05rem}
-  .fmt-item.collapsed>.fmt-children{display:none}
-  .fmt-label{font-size:.92rem}
-  .fmt-root{font-weight:700;font-size:1.04rem}
-  .fmt-cat{font-weight:600;color:var(--accent)}
-  .fmt-count{color:var(--muted);font-size:.76rem;margin-top:.18rem}
+  /* Field Map — interactive D3 tree */
+  .fmtree-d3{overflow:auto;border:1px solid var(--border);border-radius:10px;
+             background:#fff;padding:.5rem;max-height:75vh}
+  .fmtree-d3 svg text{user-select:none}
+  .fm-hint{align-self:center;color:var(--muted);font-size:.8rem;margin-left:.3rem}
   .ft-cols{display:flex;gap:1.25rem;flex-wrap:wrap}
   .ft-col{flex:1;min-width:240px;border:1px solid var(--border);border-radius:8px;padding:.5rem}
   .ft-h{font-weight:600;font-size:.78rem;color:var(--muted);margin:.1rem 0 .5rem;
@@ -763,6 +754,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
 const REPORT_MD   = __REPORT_MD__;
 const FIELD_MAP_TREE = __FIELD_MAP_TREE__;
@@ -780,49 +772,95 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   c.parentElement.replaceWith(d);
 });
 
-// 3. Field Map — collapsible tree. The root + the category row are shown; each
-//    category expands on click to reveal its items (so it stays compact).
+// 3. Field Map — interactive D3 collapsible tree. The root + categories show
+//    first; click a node to expand/collapse its children. Scroll to pan, and
+//    the buttons expand/collapse everything.
 (function(){
   var slot=document.getElementById("fieldmap-slot");
   if(!slot) return;
   if(!FIELD_MAP_TREE || !FIELD_MAP_TREE.children || !FIELD_MAP_TREE.children.length){
     slot.innerHTML="<p style='color:#6b7280'>No field map data.</p>"; return;
   }
-  function build(node, depth){
-    var kids=node.children && node.children.length;
-    var li=document.createElement("li");
-    li.className="fmt-item"+(kids?" fmt-branch":" fmt-leaf")+(depth===0?" fmt-rootitem":"")+((kids&&depth>=1)?" collapsed":"");
-    var row=document.createElement("div"); row.className="fmt-row";
-    var mark=document.createElement("span");
-    mark.className=kids?"fmt-tog":"fmt-dot"; mark.textContent=kids?"▸":"•";
-    row.appendChild(mark);
-    var lab=document.createElement("span");
-    lab.className="fmt-label"+(depth===0?" fmt-root":(depth===1?" fmt-cat":""));
-    lab.textContent=node.label; row.appendChild(lab);
-    if(kids){
-      var cnt=document.createElement("span"); cnt.className="fmt-count";
-      cnt.textContent="("+node.children.length+")"; row.appendChild(cnt);
-    }
-    li.appendChild(row);
-    if(kids){
-      var ul=document.createElement("ul"); ul.className="fmt-children";
-      node.children.forEach(function(ch){ ul.appendChild(build(ch, depth+1)); });
-      li.appendChild(ul);
-      row.addEventListener("click", function(){ li.classList.toggle("collapsed"); });
-    }
-    return li;
+  if(typeof d3==="undefined"){          // CDN blocked → readable text fallback
+    slot.innerHTML="<pre style='white-space:pre-wrap'>"+
+      FIELD_MAP_TREE.children.map(function(c){
+        return "• "+c.label+"\\n"+(c.children||[]).map(function(i){return "   – "+i.label;}).join("\\n");
+      }).join("\\n")+"</pre>";
+    return;
   }
   var bar=document.createElement("div"); bar.className="fm-tabs";
-  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button><button id="fm-collapse">⊖ Collapse all</button>';
-  var tree=document.createElement("ul"); tree.className="fmtree";
-  tree.appendChild(build(FIELD_MAP_TREE, 0));
-  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(tree);
-  bar.querySelector("#fm-expand").addEventListener("click",function(){
-    slot.querySelectorAll(".fmt-branch").forEach(function(b){ b.classList.remove("collapsed"); });
+  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button>'+
+                '<button id="fm-collapse">⊖ Collapse all</button>'+
+                '<span class="fm-hint">Click a node to expand / collapse · scroll to pan</span>';
+  var holder=document.createElement("div"); holder.className="fmtree-d3";
+  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(holder);
+
+  var dx=24, dy=210, margin={top:16,right:200,bottom:16,left:150};
+  var root=d3.hierarchy(FIELD_MAP_TREE);
+  root.x0=0; root.y0=0;
+  root.descendants().forEach(function(d,i){
+    d.id=i; d._children=d.children;
+    if(d.depth>=1) d.children=null;     // start with only the categories open
   });
-  bar.querySelector("#fm-collapse").addEventListener("click",function(){
-    slot.querySelectorAll(".fmt-branch:not(.fmt-rootitem)").forEach(function(b){ b.classList.add("collapsed"); });
-  });
+  var diagonal=d3.linkHorizontal().x(function(d){return d.y;}).y(function(d){return d.x;});
+  var svg=d3.create("svg").attr("font-family","-apple-system,Segoe UI,Roboto,sans-serif")
+    .attr("font-size",13).style("max-width","100%").style("height","auto");
+  var gLink=svg.append("g").attr("fill","none").attr("stroke","#cbd5e1").attr("stroke-width",1.5);
+  var gNode=svg.append("g").attr("cursor","pointer").attr("pointer-events","all");
+
+  function trunc(s){ return s.length>52 ? s.slice(0,51)+"…" : s; }
+  function update(source){
+    var nodes=root.descendants().reverse(), links=root.links();
+    d3.tree().nodeSize([dx,dy])(root);
+    var left=root, right=root, maxY=0;
+    root.eachBefore(function(n){ if(n.x<left.x)left=n; if(n.x>right.x)right=n; if(n.y>maxY)maxY=n.y; });
+    var height=right.x-left.x+margin.top+margin.bottom;
+    var width=maxY+margin.left+margin.right;
+    var t=svg.transition().duration(250);
+    svg.attr("viewBox",[-margin.left,left.x-margin.top,width,height]).attr("width",width).attr("height",height);
+
+    var node=gNode.selectAll("g").data(nodes,function(d){return d.id;});
+    var nodeEnter=node.enter().append("g")
+      .attr("transform","translate("+source.y0+","+source.x0+")")
+      .attr("fill-opacity",0).attr("stroke-opacity",0)
+      .on("click",function(e,d){ d.children=d.children?null:d._children; update(d); });
+    nodeEnter.append("circle").attr("r",4.5)
+      .attr("fill",function(d){return d._children?"#2563eb":"#94a3b8";}).attr("stroke-width",10);
+    nodeEnter.append("text").attr("dy","0.31em")
+      .attr("x",function(d){return d._children?-9:9;})
+      .attr("text-anchor",function(d){return d._children?"end":"start";})
+      .attr("fill",function(d){return d.depth===0?"#0f172a":(d.depth===1?"#1e40af":"#334155");})
+      .attr("font-weight",function(d){return d.depth<=1?700:400;})
+      .text(function(d){return trunc(d.data.label);})
+      .clone(true).lower().attr("stroke","white").attr("stroke-width",3.5);
+    nodeEnter.append("title").text(function(d){return d.data.label;});
+
+    node.merge(nodeEnter).transition(t)
+      .attr("transform",function(d){return "translate("+d.y+","+d.x+")";})
+      .attr("fill-opacity",1).attr("stroke-opacity",1);
+    node.exit().transition(t).remove()
+      .attr("transform","translate("+source.y+","+source.x+")")
+      .attr("fill-opacity",0).attr("stroke-opacity",0);
+
+    var link=gLink.selectAll("path").data(links,function(d){return d.target.id;});
+    var linkEnter=link.enter().append("path").attr("d",function(){var o={x:source.x0,y:source.y0};return diagonal({source:o,target:o});});
+    link.merge(linkEnter).transition(t).attr("d",diagonal);
+    link.exit().transition(t).remove().attr("d",function(){var o={x:source.x,y:source.y};return diagonal({source:o,target:o});});
+
+    root.eachBefore(function(d){ d.x0=d.x; d.y0=d.y; });
+  }
+  holder.appendChild(svg.node());
+  update(root);
+
+  function setAll(expand){
+    root.each(function(d){
+      if(expand){ if(d._children) d.children=d._children; }
+      else { d.children = d.depth>=1 ? null : d._children; }
+    });
+    update(root);
+  }
+  bar.querySelector("#fm-expand").onclick=function(){ setAll(true); };
+  bar.querySelector("#fm-collapse").onclick=function(){ setAll(false); };
 })();
 
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
@@ -1102,10 +1140,12 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
     if mega.method_families:
         ch = []
         for name, info in list(mega.method_families.items())[:8]:
-            reps = [str(x) for x in (info.get("representative_methods") or [])][:4] \
+            reps = [str(x) for x in (info.get("representative_methods") or [])][:5] \
                 if isinstance(info, dict) else []
-            tail = f" — {', '.join(reps)}" if reps else ""
-            ch.append({"label": f"{name}{cov(info)}{tail}"})
+            node: dict = {"label": f"{name}{cov(info)}"}
+            if reps:
+                node["children"] = [{"label": r} for r in reps]
+            ch.append(node)
         cats.append({"label": "Method Families", "children": ch})
     benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
     if benches:
