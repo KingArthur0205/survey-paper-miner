@@ -777,7 +777,11 @@ if(slot){
       '<button id="fm-b-diagram" data-fm="diagram">📊 Diagram</button>'+
     '</div>'+
     '<div id="fm-v-outline">'+marked.parse(OUTLINE_MD)+'</div>'+
-    '<div id="fm-v-diagram" style="display:none"><pre class="mermaid">'+MERMAID_SRC+'</pre></div>';
+    // Leave the diagram empty on load: rendering a Mermaid diagram inside a
+    // display:none container makes it measure a zero-width box and collapse to
+    // ~20px. It is rendered lazily in showFM() the first time the Diagram tab
+    // is opened, when the container has its real width.
+    '<div id="fm-v-diagram" style="display:none"></div>';
   slot.querySelectorAll(".fm-tabs button").forEach(function(b){
     b.addEventListener("click", function(){ showFM(b.dataset.fm); });
   });
@@ -854,11 +858,20 @@ function renderLinkedTree(slotId, TREE){
 renderLinkedTree("fieldtree-slot", FIELD_TREE);
 renderLinkedTree("problemtree-slot", PROBLEM_TREE);
 
+var fmDiagramRendered=false;
 function showFM(which){
   document.getElementById("fm-v-outline").style.display = which==="outline"?"":"none";
-  document.getElementById("fm-v-diagram").style.display = which==="diagram"?"":"none";
+  var dv=document.getElementById("fm-v-diagram");
+  dv.style.display = which==="diagram"?"":"none";
   document.getElementById("fm-b-outline").classList.toggle("active", which==="outline");
   document.getElementById("fm-b-diagram").classList.toggle("active", which==="diagram");
+  // Render the Field Map diagram the first time it is shown — now that its
+  // container is visible, Mermaid measures the correct width.
+  if(which==="diagram" && !fmDiagramRendered){
+    fmDiagramRendered=true;
+    dv.innerHTML='<pre class="mermaid">'+MERMAID_SRC+'</pre>';
+    try{ mermaid.run({nodes: dv.querySelectorAll("pre.mermaid")}); }catch(e){ mermaid.run(); }
+  }
 }
 </script>
 </body>
