@@ -335,17 +335,12 @@ class Exporter:
             topic, arch_triples, mega, judge_map, reading_path,
             concept_graph, landmarks, field_map_style="__slot__",
         )
-        outline_md = "\n".join(_render_field_outline(mega))
-        mermaid_src = (
-            _field_map_tree_mermaid(mega)
-            or mega.mermaid_diagram
-            or f"mindmap\n  root(({topic.title()}))"
-        )
+        field_map_tree = _field_map_tree_data(mega)
         field_tree = _field_tree_html_data(mega)
         problem_tree = _problem_tree_html_data(mega)
 
         html = _build_html_report(
-            topic, body_md, outline_md, mermaid_src, field_tree, problem_tree,
+            topic, body_md, field_map_tree, field_tree, problem_tree,
         )
         path = self._topic_dir(topic) / "report.html"
         path.write_text(html, encoding="utf-8")
@@ -704,8 +699,9 @@ def _build_report_markdown(
 
 
 # Self-contained HTML report. marked.js renders the Markdown, mermaid.js renders
-# diagrams, and the Field Map slot gets clickable Outline/Diagram tabs.
-# Only __TITLE__/__REPORT_MD__/__OUTLINE_MD__/__MERMAID_SRC__ are substituted.
+# the in-body diagrams (paper-card taxonomies, concept map), and the Field Map
+# slot gets an interactive collapsible tree built from __FIELD_MAP_TREE__.
+# Substituted: __TITLE__/__REPORT_MD__/__FIELD_MAP_TREE__/__FIELD_TREE__/__PROBLEM_TREE__.
 _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -733,6 +729,20 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
                   border-radius:8px;background:#fff;color:#374151;cursor:pointer}
   .fm-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
   .mermaid{background:#fff;text-align:center;overflow:auto}
+  /* Field Map collapsible tree */
+  .fmtree, .fmtree ul{list-style:none;margin:0;padding:0}
+  .fmtree ul{margin-left:1rem;border-left:1px solid var(--border);padding-left:.55rem}
+  .fmt-row{display:flex;align-items:flex-start;gap:.4rem;padding:.18rem .35rem;border-radius:6px}
+  .fmt-branch>.fmt-row{cursor:pointer}
+  .fmt-branch>.fmt-row:hover{background:#f3f4f6}
+  .fmt-tog{flex:none;width:1em;color:var(--muted);transition:transform .12s;margin-top:.05rem}
+  .fmt-item:not(.collapsed)>.fmt-row>.fmt-tog{transform:rotate(90deg)}
+  .fmt-dot{flex:none;color:#c4c8cf;margin-top:.05rem}
+  .fmt-item.collapsed>.fmt-children{display:none}
+  .fmt-label{font-size:.92rem}
+  .fmt-root{font-weight:700;font-size:1.04rem}
+  .fmt-cat{font-weight:600;color:var(--accent)}
+  .fmt-count{color:var(--muted);font-size:.76rem;margin-top:.18rem}
   .ft-cols{display:flex;gap:1.25rem;flex-wrap:wrap}
   .ft-col{flex:1;min-width:240px;border:1px solid var(--border);border-radius:8px;padding:.5rem}
   .ft-h{font-weight:600;font-size:.78rem;color:var(--muted);margin:.1rem 0 .5rem;
@@ -755,8 +765,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
 const REPORT_MD   = __REPORT_MD__;
-const OUTLINE_MD  = __OUTLINE_MD__;
-const MERMAID_SRC = __MERMAID_SRC__;
+const FIELD_MAP_TREE = __FIELD_MAP_TREE__;
 const FIELD_TREE  = __FIELD_TREE__;
 const PROBLEM_TREE = __PROBLEM_TREE__;
 
@@ -771,24 +780,50 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   c.parentElement.replaceWith(d);
 });
 
-// 3. inject the Field Map outline/diagram tabs into the slot
-var slot=document.getElementById("fieldmap-slot");
-if(slot){
-  slot.innerHTML =
-    '<div class="fm-tabs">'+
-      '<button id="fm-b-outline" class="active" data-fm="outline">📋 Outline</button>'+
-      '<button id="fm-b-diagram" data-fm="diagram">📊 Diagram</button>'+
-    '</div>'+
-    '<div id="fm-v-outline">'+marked.parse(OUTLINE_MD)+'</div>'+
-    // Leave the diagram empty on load: rendering a Mermaid diagram inside a
-    // display:none container makes it measure a zero-width box and collapse to
-    // ~20px. It is rendered lazily in showFM() the first time the Diagram tab
-    // is opened, when the container has its real width.
-    '<div id="fm-v-diagram" style="display:none"></div>';
-  slot.querySelectorAll(".fm-tabs button").forEach(function(b){
-    b.addEventListener("click", function(){ showFM(b.dataset.fm); });
+// 3. Field Map — collapsible tree. The root + the category row are shown; each
+//    category expands on click to reveal its items (so it stays compact).
+(function(){
+  var slot=document.getElementById("fieldmap-slot");
+  if(!slot) return;
+  if(!FIELD_MAP_TREE || !FIELD_MAP_TREE.children || !FIELD_MAP_TREE.children.length){
+    slot.innerHTML="<p style='color:#6b7280'>No field map data.</p>"; return;
+  }
+  function build(node, depth){
+    var kids=node.children && node.children.length;
+    var li=document.createElement("li");
+    li.className="fmt-item"+(kids?" fmt-branch":" fmt-leaf")+(depth===0?" fmt-rootitem":"")+((kids&&depth>=1)?" collapsed":"");
+    var row=document.createElement("div"); row.className="fmt-row";
+    var mark=document.createElement("span");
+    mark.className=kids?"fmt-tog":"fmt-dot"; mark.textContent=kids?"▸":"•";
+    row.appendChild(mark);
+    var lab=document.createElement("span");
+    lab.className="fmt-label"+(depth===0?" fmt-root":(depth===1?" fmt-cat":""));
+    lab.textContent=node.label; row.appendChild(lab);
+    if(kids){
+      var cnt=document.createElement("span"); cnt.className="fmt-count";
+      cnt.textContent="("+node.children.length+")"; row.appendChild(cnt);
+    }
+    li.appendChild(row);
+    if(kids){
+      var ul=document.createElement("ul"); ul.className="fmt-children";
+      node.children.forEach(function(ch){ ul.appendChild(build(ch, depth+1)); });
+      li.appendChild(ul);
+      row.addEventListener("click", function(){ li.classList.toggle("collapsed"); });
+    }
+    return li;
+  }
+  var bar=document.createElement("div"); bar.className="fm-tabs";
+  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button><button id="fm-collapse">⊖ Collapse all</button>';
+  var tree=document.createElement("ul"); tree.className="fmtree";
+  tree.appendChild(build(FIELD_MAP_TREE, 0));
+  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(tree);
+  bar.querySelector("#fm-expand").addEventListener("click",function(){
+    slot.querySelectorAll(".fmt-branch").forEach(function(b){ b.classList.remove("collapsed"); });
   });
-}
+  bar.querySelector("#fm-collapse").addEventListener("click",function(){
+    slot.querySelectorAll(".fmt-branch:not(.fmt-rootitem)").forEach(function(b){ b.classList.add("collapsed"); });
+  });
+})();
 
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
 mermaid.run();
@@ -860,22 +895,6 @@ function renderLinkedTree(slotId, TREE){
 }
 renderLinkedTree("fieldtree-slot", FIELD_TREE);
 renderLinkedTree("problemtree-slot", PROBLEM_TREE);
-
-var fmDiagramRendered=false;
-function showFM(which){
-  document.getElementById("fm-v-outline").style.display = which==="outline"?"":"none";
-  var dv=document.getElementById("fm-v-diagram");
-  dv.style.display = which==="diagram"?"":"none";
-  document.getElementById("fm-b-outline").classList.toggle("active", which==="outline");
-  document.getElementById("fm-b-diagram").classList.toggle("active", which==="diagram");
-  // Render the Field Map diagram the first time it is shown — now that its
-  // container is visible, Mermaid measures the correct width.
-  if(which==="diagram" && !fmDiagramRendered){
-    fmDiagramRendered=true;
-    dv.innerHTML='<pre class="mermaid">'+MERMAID_SRC+'</pre>';
-    try{ mermaid.run({nodes: dv.querySelectorAll("pre.mermaid")}); }catch(e){ mermaid.run(); }
-  }
-}
 </script>
 </body>
 </html>
@@ -883,7 +902,7 @@ function showFM(which){
 
 
 def _build_html_report(
-    topic: str, body_md: str, outline_md: str, mermaid_src: str,
+    topic: str, body_md: str, field_map_tree: dict | None = None,
     field_tree: dict | None = None, problem_tree: dict | None = None,
 ) -> str:
     """Fill the HTML template, JSON-encoding the strings for safe embedding."""
@@ -891,15 +910,14 @@ def _build_html_report(
         # JSON-encode, then neutralise any "</" so it can't close the <script>
         return json.dumps(s).replace("</", "<\\/")
 
-    def jsdata(d: dict | None) -> str:
-        return json.dumps(d or {"pairs": []}).replace("</", "<\\/")
+    def jsdata(d: dict | None, empty: dict | None = None) -> str:
+        return json.dumps(d or empty or {"pairs": []}).replace("</", "<\\/")
 
     return (
         _HTML_REPORT_TEMPLATE
         .replace("__TITLE__", topic.title())
         .replace("__REPORT_MD__", js(body_md))
-        .replace("__OUTLINE_MD__", js(outline_md))
-        .replace("__MERMAID_SRC__", js(mermaid_src))
+        .replace("__FIELD_MAP_TREE__", jsdata(field_map_tree, {"children": []}))
         .replace("__FIELD_TREE__", jsdata(field_tree))
         .replace("__PROBLEM_TREE__", jsdata(problem_tree))
     )
@@ -1057,6 +1075,58 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
     if len(lines) <= 2:           # only ROOT, no categories
         return ""
     return "\n".join(lines)
+
+
+def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
+    """
+    Field Map as nested JSON for the interactive collapsible tree (HTML):
+        {label, children:[{label, children:[...]}]}
+    Same content as `_render_field_outline` — Topic → category → item — so the
+    HTML tree shows the root + categories first and expands items on click.
+    """
+    n = len(mega.source_papers)
+    low = max(1, round(n * 0.3))
+
+    def cov(info: object) -> str:
+        if isinstance(info, dict) and isinstance(info.get("coverage_count"), int):
+            c = info["coverage_count"]
+            return f" ({c}/{n})" + (" ⚠️" if c < low else "")
+        return ""
+
+    cats: list[dict] = []
+    if mega.major_tasks:
+        cats.append({"label": "Major Tasks", "children": [
+            {"label": f"{name}{cov(info)}"}
+            for name, info in list(mega.major_tasks.items())[:8]
+        ]})
+    if mega.method_families:
+        ch = []
+        for name, info in list(mega.method_families.items())[:8]:
+            reps = [str(x) for x in (info.get("representative_methods") or [])][:4] \
+                if isinstance(info, dict) else []
+            tail = f" — {', '.join(reps)}" if reps else ""
+            ch.append({"label": f"{name}{cov(info)}{tail}"})
+        cats.append({"label": "Method Families", "children": ch})
+    benches = [d.get("name", "") for d in mega.datasets_and_benchmarks if d.get("name")]
+    if benches:
+        cats.append({"label": "Benchmarks & Datasets",
+                     "children": [{"label": b} for b in benches[:8]]})
+    if mega.challenges:
+        ch = []
+        for name, info in list(mega.challenges.items())[:8]:
+            sev = ""
+            if isinstance(info, dict) and str(info.get("severity", "")).strip():
+                sev = f" ({str(info['severity']).strip()})"
+            ch.append({"label": f"{name}{sev}{cov(info)}"})
+        cats.append({"label": "Challenges", "children": ch})
+    if mega.open_gaps:
+        cats.append({"label": "Research Gaps",
+                     "children": [{"label": g.gap} for g in mega.open_gaps[:6]]})
+    if mega.applications:
+        cats.append({"label": "Applications",
+                     "children": [{"label": a} for a in mega.applications[:8]]})
+
+    return {"label": mega.topic.title(), "children": cats}
 
 
 # ── Field Tree (problem-solving chain: research area → method → technique) ────
