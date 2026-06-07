@@ -753,6 +753,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .ft-item:hover{background:#f3f4f6;border-color:#93c5fd}
   .ft-item.active{background:#dbeafe;color:#1e40af;font-weight:600;border-color:var(--accent)}
   .ft-item.dim{opacity:.4}
+  .ft-item.hidden{display:none}
   .ft-hint{color:var(--muted);font-size:.83rem;margin:.4rem 0 0}
   .topbar{position:sticky;top:0;background:#ffffffee;backdrop-filter:blur(6px);
           border-bottom:1px solid var(--border);margin:-2.5rem -1.5rem 1.5rem;
@@ -858,7 +859,7 @@ function renderBoxTree(holder, DATA, opts){
 document.querySelectorAll("div.taxtree").forEach(function(slot){
   var data; try{ data=JSON.parse(slot.getAttribute("data-tax")); }catch(e){ return; }
   slot.removeAttribute("data-tax"); slot.classList.add("fmtree-d3");
-  renderBoxTree(slot, data, {initialDepth:99});   // taxonomies are small → fully expanded
+  renderBoxTree(slot, data, {initialDepth:1});    // collapsed by default — click a node to expand
 });
 
 // 4. render all mermaid diagrams (hidden ones still render; just not shown)
@@ -877,7 +878,7 @@ function renderLinkedTree(slotId, TREE){
   pairs.forEach(function(p,i){
     tabs+='<button class="ft-pair'+(i===0?" active":"")+'" data-i="'+i+'">'+esc(p.leftLabel)+" ↔ "+esc(p.rightLabel)+"</button>";
   });
-  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click an item to draw lines to everything it connects to on the other side. Click it again to clear.</p>';
+  tabs+='</div><div class="ft-view"></div><p class="ft-hint">Click an item to show only what it connects to, with lines linking them. Click it again to bring everything back.</p>';
   slot.innerHTML=tabs;
   slot.querySelectorAll(".ft-pair").forEach(function(b){
     b.addEventListener("click",function(){
@@ -905,8 +906,8 @@ function renderLinkedTree(slotId, TREE){
 
     function clearLines(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
     function reset(){
-      L.forEach(function(e){e.classList.remove("active","dim");});
-      R.forEach(function(e){e.classList.remove("active","dim");});
+      L.forEach(function(e){e.classList.remove("active","dim","hidden");});
+      R.forEach(function(e){e.classList.remove("active","dim","hidden");});
       clearLines();
     }
     function line(aEl,bEl){      // a = left box (line from its right edge) → b = right box (left edge)
@@ -920,25 +921,24 @@ function renderLinkedTree(slotId, TREE){
       svg.appendChild(pth);
     }
     function sizeSvg(){ svg.setAttribute("width",view.scrollWidth); svg.setAttribute("height",view.scrollHeight); }
-    // Focusing an item highlights it + everything it connects to, dims the rest,
-    // and draws a connecting line to each connected item on the other side.
+    // Focusing an item HIDES everything that is not the item or one of its
+    // connections, then draws a line to each connected item on the other side.
+    // Lines are drawn AFTER hiding so the coordinates match the reflowed layout.
     function focusL(i){
-      reset(); sizeSvg(); L[i].classList.add("active");
+      reset(); L[i].classList.add("active");
       var rel=links[lefts[i]]||[];
-      R.forEach(function(re,ri){
-        if(rel.indexOf(rights[ri])>=0){ re.classList.add("active"); line(L[i],re); }
-        else re.classList.add("dim");
-      });
-      L.forEach(function(le,li){ if(li!==i) le.classList.add("dim"); });
+      R.forEach(function(re,ri){ if(rel.indexOf(rights[ri])>=0) re.classList.add("active"); else re.classList.add("hidden"); });
+      L.forEach(function(le,li){ if(li!==i) le.classList.add("hidden"); });
+      sizeSvg();
+      R.forEach(function(re,ri){ if(rel.indexOf(rights[ri])>=0) line(L[i],re); });
     }
     function focusR(i){
-      reset(); sizeSvg(); R[i].classList.add("active");
+      reset(); R[i].classList.add("active");
       var rel=rev[rights[i]]||[];
-      L.forEach(function(le,li){
-        if(rel.indexOf(lefts[li])>=0){ le.classList.add("active"); line(le,R[i]); }
-        else le.classList.add("dim");
-      });
-      R.forEach(function(re,ri){ if(ri!==i) re.classList.add("dim"); });
+      L.forEach(function(le,li){ if(rel.indexOf(lefts[li])>=0) le.classList.add("active"); else le.classList.add("hidden"); });
+      R.forEach(function(re,ri){ if(ri!==i) re.classList.add("hidden"); });
+      sizeSvg();
+      L.forEach(function(le,li){ if(rel.indexOf(lefts[li])>=0) line(le,R[i]); });
     }
     L.forEach(function(el,i){ el.addEventListener("click",function(){
       if(sel&&sel.s==='L'&&sel.i===i){ reset(); sel=null; }   // re-click → clear
@@ -1993,22 +1993,23 @@ def _render_part4_paper_cards(
             lines += _format_prose_as_bullets(arch.organizational_logic)
             lines.append("")
 
-        # Structural strengths and weaknesses (from architecture analysis)
+        # Structural strengths and weaknesses (from architecture analysis).
+        # Each on its own paragraph (blank line) so they don't run together.
         if arch.structural_strengths and not arch.analysis_failed:
-            lines.append(
-                f"**Read this if:** {arch.structural_strengths[0]}"
-            )
+            lines.append(f"**Read this if:** {arch.structural_strengths[0]}")
+            lines.append("")
         if arch.notable_omissions and not arch.analysis_failed:
-            lines.append(
-                f"**Notable omissions:** {', '.join(arch.notable_omissions[:3])}"
-            )
+            lines.append(f"**Notable omissions:** {', '.join(arch.notable_omissions[:3])}")
+            lines.append("")
 
         # LLM-Judge strengths and weaknesses
         if jr and not jr.judge_failed:
             if jr.strengths:
                 lines.append(f"**Strengths:** {' · '.join(jr.strengths[:3])}")
+                lines.append("")
             if jr.weaknesses:
                 lines.append(f"**Weaknesses:** {' · '.join(jr.weaknesses[:2])}")
+                lines.append("")
         lines.append("")
 
     return lines
