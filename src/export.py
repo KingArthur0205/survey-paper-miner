@@ -336,7 +336,11 @@ class Exporter:
             concept_graph, landmarks, field_map_style="__slot__",
         )
         outline_md = "\n".join(_render_field_outline(mega))
-        mermaid_src = mega.mermaid_diagram or f"mindmap\n  root(({topic.title()}))"
+        mermaid_src = (
+            _field_map_tree_mermaid(mega)
+            or mega.mermaid_diagram
+            or f"mindmap\n  root(({topic.title()}))"
+        )
         field_tree = _field_tree_html_data(mega)
         problem_tree = _problem_tree_html_data(mega)
 
@@ -745,7 +749,6 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div class="topbar">📄 Interactive report — use the buttons under <b>Field Map</b> to switch between outline and diagram.</div>
 <div id="content">Loading…</div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -959,6 +962,101 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
             out.append(f"  - {a}")
 
     return out
+
+
+def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
+    """
+    Field Map as a hierarchical TREE diagram (Mermaid flowchart, left→right):
+
+        Topic ─┬─ Major Tasks ─── <task> …
+               ├─ Method Families ─ <family> ── <representative method> …
+               ├─ Benchmarks & Datasets ─ <name> …
+               ├─ Challenges ─── <challenge> …
+               ├─ Research Gaps ─ <gap> …
+               └─ Applications ── <app> …
+
+    Same content as `_render_field_outline`, but drawn as one big readable tree.
+    Left→right so the many leaf nodes stack vertically instead of overflowing.
+    Returns "" when there is no structured data to draw.
+    """
+    n = len(mega.source_papers)
+    low = max(1, round(n * 0.3))
+    counter = [0]
+
+    def nid(prefix: str) -> str:
+        counter[0] += 1
+        return f"{prefix}{counter[0]}"
+
+    def clean(s: object, maxlen: int = 46) -> str:
+        # Strip characters that break Mermaid quoted labels; keep ()/ which are safe.
+        t = re.sub(r'["#<>\[\]{}|]', " ", str(s).replace("\n", " "))
+        t = re.sub(r"\s+", " ", t).strip()
+        if len(t) > maxlen:
+            t = t[: maxlen - 1].rstrip() + "…"
+        return t or "—"
+
+    def cov(info: object) -> str:
+        if isinstance(info, dict) and isinstance(info.get("coverage_count"), int):
+            c = info["coverage_count"]
+            return f" ({c}/{n})" + (" ⚠️" if c < low else "")
+        return ""
+
+    lines = ["flowchart LR"]
+    root = "ROOT"
+    lines.append(f'  {root}(["{clean(mega.topic.title(), 60)}"])')
+
+    def category(title: str, items: list[tuple[str, list[str]]], label_max: int = 46) -> None:
+        items = [it for it in items if it[0]]
+        if not items:
+            return
+        cid = nid("CAT")
+        lines.append(f'  {cid}["{clean(title, 40)}"]')
+        lines.append(f"  {root} --> {cid}")
+        for label, children in items:
+            iid = nid("N")
+            lines.append(f'  {iid}["{clean(label, label_max)}"]')
+            lines.append(f"  {cid} --> {iid}")
+            for ch in children:
+                if not str(ch).strip():
+                    continue
+                chid = nid("N")
+                lines.append(f'  {chid}(["{clean(ch)}"])')
+                lines.append(f"  {iid} --> {chid}")
+
+    # Major Tasks
+    category("Major Tasks", [
+        (f"{name}{cov(info)}", [])
+        for name, info in list(mega.major_tasks.items())[:8]
+    ])
+    # Method Families — representative methods inline (matches the Outline)
+    mf_items: list[tuple[str, list[str]]] = []
+    for name, info in list(mega.method_families.items())[:8]:
+        reps = []
+        if isinstance(info, dict):
+            reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
+        tail = f" — {', '.join(reps)}" if reps else ""
+        mf_items.append((f"{name}{cov(info)}{tail}", []))
+    category("Method Families", mf_items, label_max=78)
+    # Benchmarks & Datasets
+    category("Benchmarks & Datasets", [
+        (d.get("name", ""), []) for d in mega.datasets_and_benchmarks if d.get("name")
+    ][:8])
+    # Challenges
+    ch_items: list[tuple[str, list[str]]] = []
+    for name, info in list(mega.challenges.items())[:8]:
+        sev = ""
+        if isinstance(info, dict) and str(info.get("severity", "")).strip():
+            sev = f" ({str(info['severity']).strip()})"
+        ch_items.append((f"{name}{sev}{cov(info)}", []))
+    category("Challenges", ch_items)
+    # Research Gaps
+    category("Research Gaps", [(g.gap, []) for g in mega.open_gaps[:6]])
+    # Applications
+    category("Applications", [(a, []) for a in mega.applications[:8]])
+
+    if len(lines) <= 2:           # only ROOT, no categories
+        return ""
+    return "\n".join(lines)
 
 
 # ── Field Tree (problem-solving chain: research area → method → technique) ────
@@ -1276,7 +1374,8 @@ def _render_part1_field_architecture(
     style = (field_map_style or "outline").lower()
     mermaid_block = [
         "```mermaid",
-        mega.mermaid_diagram or ("mindmap\n  root((" + topic.title() + "))"),
+        (_field_map_tree_mermaid(mega) or mega.mermaid_diagram
+         or ("mindmap\n  root((" + topic.title() + "))")),
         "```",
         "",
     ]
