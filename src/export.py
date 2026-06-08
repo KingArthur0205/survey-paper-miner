@@ -974,7 +974,7 @@ function renderBoxTree(holder, DATA, opts){
     tabs.querySelector("#fm-expand").style.display=isMap?"none":"";
     tabs.querySelector("#fm-collapse").style.display=isMap?"none":"";
     tabs.querySelector("#fm-hint").textContent=isMap
-      ? "Click a node to expand / collapse & zoom to it · drag to pan · scroll to zoom · double-click to fit"
+      ? "Drag to pan · scroll to zoom · double-click to reset"
       : "Click a node to expand / collapse · scroll to pan";
     treeWrap.style.display=isMap?"none":"";
     mapWrap.style.display=isMap?"":"none";
@@ -984,76 +984,42 @@ function renderBoxTree(holder, DATA, opts){
   tabs.querySelector("#fmv-map").onclick=function(){ show("map"); };
 })();
 
-// Render the Field Map as an interactive radial tree (the "architecture map"):
-// colour-coded branches, each node expands/collapses AND zooms to itself on
-// click; drag to pan, scroll to zoom, double-click background to fit. Same data
-// as the Tree view (FIELD_MAP_TREE).
+// Render the radial mindmap into a pannable / zoomable surface.
 function renderFieldMapMap(mapWrap){
-  if(typeof d3==="undefined" || !FIELD_MAP_TREE || !FIELD_MAP_TREE.children){
+  if(typeof mermaid==="undefined" || !FIELD_MAP_MERMAID){
     mapWrap.innerHTML="<p style='color:#6b7280'>—</p>"; return;
   }
-  var W=mapWrap.clientWidth||800, H=mapWrap.clientHeight||520;
-  var FILL=["#fef3c7","#dcfce7","#fce7f3","#ede9fe","#fee2e2","#dbeafe","#cffafe","#ffedd5"];
-  var STROKE=["#f59e0b","#22c55e","#ec4899","#8b5cf6","#ef4444","#3b82f6","#06b6d4","#f97316"];
+  var pz=document.createElement("div"); pz.className="fm-pz";
+  var pre=document.createElement("pre"); pre.className="mermaid"; pre.textContent=FIELD_MAP_MERMAID;
+  pz.appendChild(pre); mapWrap.innerHTML=""; mapWrap.appendChild(pz);
 
-  var svg=d3.create("svg").attr("width",W).attr("height",H).style("display","block");
-  var g=svg.append("g");
-  var gLink=g.append("g").attr("fill","none").attr("stroke","#cbd5e1").attr("stroke-width",1.4).attr("stroke-opacity",.7);
-  var gNode=g.append("g");
-  mapWrap.innerHTML=""; mapWrap.appendChild(svg.node());
-
-  var root=d3.hierarchy(FIELD_MAP_TREE);
-  var ic=0; root.descendants().forEach(function(d){ d.id=++ic; d._children=d.children; if(d.depth>=1) d.children=null; });
-  function bidx(d){ var a=d; while(a.depth>1) a=a.parent; return (a.parent&&a.parent.children)? a.parent.children.indexOf(a):0; }
-  function trunc(s,n){ s=String(s); return s.length>n? s.slice(0,n-1)+"…": s; }
-
-  var R=Math.max(240, Math.min(W,H)/2-30);
-  var tree=d3.tree().size([2*Math.PI,R]).separation(function(a,b){ return (a.parent===b.parent?1:1.7)/Math.max(1,a.depth); });
-  var linkGen=d3.linkRadial().angle(function(d){return d.x;}).radius(function(d){return d.y;});
-
-  var zoom=d3.zoom().scaleExtent([0.15,6]).on("zoom",function(e){ g.attr("transform",e.transform); });
-  svg.call(zoom).on("dblclick.zoom",null).on("dblclick",function(){ fitAll(); });
-  function fitAll(){ svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity.translate(W/2,H/2).scale(0.85)); }
-  function zoomTo(d){ var s=1.5, p=d3.pointRadial(d.x,d.y);
-    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(W/2-p[0]*s,H/2-p[1]*s).scale(s)); }
-  svg.call(zoom.transform, d3.zoomIdentity.translate(W/2,H/2).scale(0.85));
-
-  function update(source){
-    tree(root);
-    var nodes=root.descendants(), links=root.links();
-
-    var link=gLink.selectAll("path").data(links,function(d){return d.target.id;});
-    link.exit().remove();
-    link.enter().append("path").merge(link).transition().duration(450).attr("d",linkGen);
-
-    var node=gNode.selectAll("g.rm-node").data(nodes,function(d){return d.id;});
-    node.exit().remove();
-    var enter=node.enter().append("g").attr("class","rm-node").style("cursor","pointer")
-      .attr("transform",function(){ var p=d3.pointRadial(source.x0!=null?source.x0:source.x, source.y0!=null?source.y0:source.y); return "translate("+p[0]+","+p[1]+")"; })
-      .on("click",function(e,d){ e.stopPropagation(); if(d._children){ d.children=d.children?null:d._children; update(d);} zoomTo(d); });
-    enter.append("rect").attr("rx",7).attr("ry",7);
-    enter.append("text").attr("dy","0.32em").attr("text-anchor","middle");
-    enter.append("title");
-    var all=enter.merge(node);
-    all.select("text")
-      .attr("font-size",function(d){return d.depth===0?14:12;})
-      .attr("font-weight",function(d){return d.depth<=1?700:400;})
-      .attr("fill",function(d){return d.depth===0?"#fff":"#1f2937";})
-      .text(function(d){ return trunc(d.data.label, d.depth===0?34:40) + (d._children?(d.children?"  ▾":"  ▸"):""); });
-    all.select("title").text(function(d){return d.data.label;});
-    all.each(function(d){
-      var bb=this.querySelector("text").getBBox(), r=this.querySelector("rect"), px=10, py=6;
-      r.setAttribute("x",bb.x-px); r.setAttribute("y",bb.y-py);
-      r.setAttribute("width",bb.width+2*px); r.setAttribute("height",bb.height+2*py);
-      r.setAttribute("fill", d.depth===0?"#2563eb": FILL[bidx(d)%FILL.length]);
-      r.setAttribute("stroke", d.depth===0?"#1d4ed8": STROKE[bidx(d)%STROKE.length]);
-      r.setAttribute("stroke-width",1.2);
-    });
-    all.transition().duration(450).attr("transform",function(d){ var p=d3.pointRadial(d.x,d.y); return "translate("+p[0]+","+p[1]+")"; });
-
-    root.each(function(d){ d.x0=d.x; d.y0=d.y; });
+  var scale=1, tx=24, ty=24;
+  function apply(){ pz.style.transform="translate("+tx+"px,"+ty+"px) scale("+scale+")"; }
+  function fit(){
+    var svg=pz.querySelector("svg"); if(!svg) return;
+    var vb=svg.viewBox && svg.viewBox.baseVal;
+    var natW=(vb&&vb.width)||svg.getBBox().width, natH=(vb&&vb.height)||svg.getBBox().height;
+    if(!(natW>0&&natH>0)) return;
+    svg.style.maxWidth="none"; svg.setAttribute("width",natW); svg.setAttribute("height",natH);
+    var cw=mapWrap.clientWidth, ch=mapWrap.clientHeight;
+    scale=Math.min(cw/natW, ch/natH)*0.92; if(!(scale>0&&isFinite(scale))) scale=1;
+    tx=(cw-natW*scale)/2; ty=(ch-natH*scale)/2; apply();
   }
-  update(root);
+  apply();
+  var p; try{ p=mermaid.run({nodes:[pre]}); }catch(e){ try{ p=mermaid.run(); }catch(_){} }
+  if(p&&p.then) p.then(fit); else setTimeout(fit,80);
+
+  mapWrap.addEventListener("wheel", function(e){
+    e.preventDefault();
+    var r=mapWrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    var k=e.deltaY<0?1.1:1/1.1, ns=Math.max(0.1, Math.min(6, scale*k));
+    tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale); scale=ns; apply();
+  }, {passive:false});
+  var drag=false, sx, sy;
+  mapWrap.addEventListener("mousedown", function(e){ drag=true; mapWrap.classList.add("grabbing"); sx=e.clientX-tx; sy=e.clientY-ty; });
+  window.addEventListener("mousemove", function(e){ if(drag){ tx=e.clientX-sx; ty=e.clientY-sy; apply(); } });
+  window.addEventListener("mouseup", function(){ drag=false; mapWrap.classList.remove("grabbing"); });
+  mapWrap.addEventListener("dblclick", fit);   // reset to fit-to-view
 }
 
 // 3b. Per-paper taxonomy trees — same interactive box tree (data in data-tax)
