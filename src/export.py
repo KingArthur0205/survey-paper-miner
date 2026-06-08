@@ -348,13 +348,14 @@ class Exporter:
             system_design, landmarks, field_map_style="__slot__",
         )
         field_map_tree = _field_map_tree_data(mega)
+        field_map_mermaid = _field_map_mindmap_mermaid(mega)
         field_tree = _field_tree_html_data(mega)
         problem_tree = _problem_tree_html_data(mega)
         system_design_data = _system_design_html_data(system_design)
 
         html = _build_html_report(
             topic, body_md, field_map_tree, field_tree, problem_tree,
-            system_design_data,
+            system_design_data, field_map_mermaid,
         )
         path = self._report_path(topic, "html")
         path.write_text(html, encoding="utf-8")
@@ -739,10 +740,17 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   pre{background:#f6f8fa;padding:.8rem;border-radius:8px;overflow:auto}
   blockquote{border-left:3px solid #d1d5db;margin:.6rem 0;padding:.2rem .9rem;color:var(--muted)}
   hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
-  .fm-tabs{display:flex;gap:.5rem;margin:.6rem 0 1rem}
+  .fm-tabs{display:flex;gap:.5rem;margin:.6rem 0 1rem;flex-wrap:wrap;align-items:center}
   .fm-tabs button{font-size:.9rem;padding:.35rem .9rem;border:1px solid var(--border);
                   border-radius:8px;background:#fff;color:#374151;cursor:pointer}
   .fm-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .fm-vsep{display:inline-block;width:1px;height:1.1rem;background:var(--border);margin:0 .25rem}
+  /* Field Map — radial "architecture map" view (pan / zoom) */
+  .fm-map{overflow:hidden;border:1px solid var(--border);border-radius:10px;background:#fff;
+          height:72vh;position:relative;cursor:grab;user-select:none}
+  .fm-map.grabbing{cursor:grabbing}
+  .fm-pz{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+  .fm-map .mermaid{background:transparent;text-align:left;overflow:visible}
   .mermaid{background:#fff;text-align:center;overflow:auto}
   /* Field Map — interactive D3 tree of HTML boxes */
   .fmtree-d3{overflow:auto;border:1px solid var(--border);border-radius:10px;
@@ -822,6 +830,7 @@ const FIELD_MAP_TREE = __FIELD_MAP_TREE__;
 const FIELD_TREE  = __FIELD_TREE__;
 const PROBLEM_TREE = __PROBLEM_TREE__;
 const SYSTEM_DESIGN = __SYSTEM_DESIGN__;
+const FIELD_MAP_MERMAID = __FIELD_MAP_MERMAID__;
 
 mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
 
@@ -934,18 +943,84 @@ function renderBoxTree(holder, DATA, opts){
   return { expandAll:function(){setAll(true);}, collapseAll:function(){setAll(false);} };
 }
 
-// 3a. Field Map
+// 3a. Field Map — Tree view (default) + Map view (radial mindmap); same data.
 (function(){
   var slot=document.getElementById("fieldmap-slot"); if(!slot) return;
-  var bar=document.createElement("div"); bar.className="fm-tabs";
-  bar.innerHTML='<button id="fm-expand">⊕ Expand all</button>'+
-                '<button id="fm-collapse">⊖ Collapse all</button>'+
-                '<span class="fm-hint">Click a node to expand / collapse · scroll to pan</span>';
+
+  var tabs=document.createElement("div"); tabs.className="fm-tabs";
+  tabs.innerHTML='<button id="fmv-tree" class="active">🌳 Tree</button>'+
+                 '<button id="fmv-map">🗺 Map</button>'+
+                 '<span class="fm-vsep"></span>'+
+                 '<button id="fm-expand">⊕ Expand all</button>'+
+                 '<button id="fm-collapse">⊖ Collapse all</button>'+
+                 '<span class="fm-hint" id="fm-hint">Click a node to expand / collapse · scroll to pan</span>';
+
+  var treeWrap=document.createElement("div");
   var holder=document.createElement("div"); holder.className="fmtree-d3";
-  slot.innerHTML=""; slot.appendChild(bar); slot.appendChild(holder);
+  treeWrap.appendChild(holder);
+
+  var mapWrap=document.createElement("div"); mapWrap.className="fm-map"; mapWrap.style.display="none";
+
+  slot.innerHTML=""; slot.appendChild(tabs); slot.appendChild(treeWrap); slot.appendChild(mapWrap);
+
   var ctrl=renderBoxTree(holder, FIELD_MAP_TREE, {initialDepth:1});
-  if(ctrl){ bar.querySelector("#fm-expand").onclick=ctrl.expandAll; bar.querySelector("#fm-collapse").onclick=ctrl.collapseAll; }
+  if(ctrl){ tabs.querySelector("#fm-expand").onclick=ctrl.expandAll; tabs.querySelector("#fm-collapse").onclick=ctrl.collapseAll; }
+
+  var mapDone=false;
+  function show(which){
+    var isMap=which==="map";
+    tabs.querySelector("#fmv-tree").classList.toggle("active", !isMap);
+    tabs.querySelector("#fmv-map").classList.toggle("active", isMap);
+    tabs.querySelector("#fm-expand").style.display=isMap?"none":"";
+    tabs.querySelector("#fm-collapse").style.display=isMap?"none":"";
+    tabs.querySelector("#fm-hint").textContent=isMap
+      ? "Drag to pan · scroll to zoom · double-click to reset"
+      : "Click a node to expand / collapse · scroll to pan";
+    treeWrap.style.display=isMap?"none":"";
+    mapWrap.style.display=isMap?"":"none";
+    if(isMap && !mapDone){ mapDone=true; renderFieldMapMap(mapWrap); }   // lazy — needs a visible box
+  }
+  tabs.querySelector("#fmv-tree").onclick=function(){ show("tree"); };
+  tabs.querySelector("#fmv-map").onclick=function(){ show("map"); };
 })();
+
+// Render the radial mindmap into a pannable / zoomable surface.
+function renderFieldMapMap(mapWrap){
+  if(typeof mermaid==="undefined" || !FIELD_MAP_MERMAID){
+    mapWrap.innerHTML="<p style='color:#6b7280'>—</p>"; return;
+  }
+  var pz=document.createElement("div"); pz.className="fm-pz";
+  var pre=document.createElement("pre"); pre.className="mermaid"; pre.textContent=FIELD_MAP_MERMAID;
+  pz.appendChild(pre); mapWrap.innerHTML=""; mapWrap.appendChild(pz);
+
+  var scale=1, tx=24, ty=24;
+  function apply(){ pz.style.transform="translate("+tx+"px,"+ty+"px) scale("+scale+")"; }
+  function fit(){
+    var svg=pz.querySelector("svg"); if(!svg) return;
+    var vb=svg.viewBox && svg.viewBox.baseVal;
+    var natW=(vb&&vb.width)||svg.getBBox().width, natH=(vb&&vb.height)||svg.getBBox().height;
+    if(!(natW>0&&natH>0)) return;
+    svg.style.maxWidth="none"; svg.setAttribute("width",natW); svg.setAttribute("height",natH);
+    var cw=mapWrap.clientWidth, ch=mapWrap.clientHeight;
+    scale=Math.min(cw/natW, ch/natH)*0.92; if(!(scale>0&&isFinite(scale))) scale=1;
+    tx=(cw-natW*scale)/2; ty=(ch-natH*scale)/2; apply();
+  }
+  apply();
+  var p; try{ p=mermaid.run({nodes:[pre]}); }catch(e){ try{ p=mermaid.run(); }catch(_){} }
+  if(p&&p.then) p.then(fit); else setTimeout(fit,80);
+
+  mapWrap.addEventListener("wheel", function(e){
+    e.preventDefault();
+    var r=mapWrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    var k=e.deltaY<0?1.1:1/1.1, ns=Math.max(0.1, Math.min(6, scale*k));
+    tx=mx-(mx-tx)*(ns/scale); ty=my-(my-ty)*(ns/scale); scale=ns; apply();
+  }, {passive:false});
+  var drag=false, sx, sy;
+  mapWrap.addEventListener("mousedown", function(e){ drag=true; mapWrap.classList.add("grabbing"); sx=e.clientX-tx; sy=e.clientY-ty; });
+  window.addEventListener("mousemove", function(e){ if(drag){ tx=e.clientX-sx; ty=e.clientY-sy; apply(); } });
+  window.addEventListener("mouseup", function(){ drag=false; mapWrap.classList.remove("grabbing"); });
+  mapWrap.addEventListener("dblclick", fit);   // reset to fit-to-view
+}
 
 // 3b. Per-paper taxonomy trees — same interactive box tree (data in data-tax)
 document.querySelectorAll("div.taxtree").forEach(function(slot){
@@ -1097,7 +1172,7 @@ renderLinkedTree("problemtree-slot", PROBLEM_TREE);
 def _build_html_report(
     topic: str, body_md: str, field_map_tree: dict | None = None,
     field_tree: dict | None = None, problem_tree: dict | None = None,
-    system_design: dict | None = None,
+    system_design: dict | None = None, field_map_mermaid: str = "",
 ) -> str:
     """Fill the HTML template, JSON-encoding the strings for safe embedding."""
     def js(s: str) -> str:
@@ -1112,6 +1187,7 @@ def _build_html_report(
         .replace("__TITLE__", topic.title())
         .replace("__REPORT_MD__", js(body_md))
         .replace("__FIELD_MAP_TREE__", jsdata(field_map_tree, {"children": []}))
+        .replace("__FIELD_MAP_MERMAID__", js(field_map_mermaid or ""))
         .replace("__FIELD_TREE__", jsdata(field_tree))
         .replace("__PROBLEM_TREE__", jsdata(problem_tree))
         .replace("__SYSTEM_DESIGN__", jsdata(system_design, {"layers": []}))
@@ -1372,6 +1448,33 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
                      "children": [{"label": a, "html": b(a)} for a in mega.applications]})
 
     return {"label": mega.topic.title(), "children": cats}
+
+
+def _field_map_mindmap_mermaid(mega: FieldMegaArchitecture) -> str:
+    """
+    The Field Map as a Mermaid `mindmap` (the radial "architecture map" view) —
+    built from the SAME nested data as `_field_map_tree_data`, so the HTML
+    report's Tree and Map views show identical content and levels (topic →
+    category → item). Returns "" when there is no data.
+    """
+    data = _field_map_tree_data(mega)
+    if not data.get("children"):
+        return ""
+
+    def clean(s: object, maxlen: int = 70) -> str:
+        # Mindmap node text: strip the chars Mermaid treats as node-shape syntax.
+        t = re.sub(r'[()\[\]{}"#;]', " ", " ".join(str(s).split()))
+        t = re.sub(r"\s+", " ", t).strip()
+        return (t[: maxlen - 1] + "…") if len(t) > maxlen else (t or "—")
+
+    lines = ["mindmap", f"  root(({clean(data['label'], 60)}))"]
+    for cat in data["children"]:
+        lines.append("    " + clean(cat["label"]))
+        for item in cat.get("children", []):
+            lines.append("      " + clean(item["label"]))
+            for sub in item.get("children", []):
+                lines.append("        " + clean(sub["label"]))
+    return "\n".join(lines)
 
 
 # ── Field Tree (problem-solving chain: research area → method → technique) ────
