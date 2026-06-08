@@ -39,6 +39,8 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
+# Bump when the per-paper schema changes, to invalidate stale cached extractions.
+_ARCH_SCHEMA_VERSION = "v2-glossary"
 _CACHE_DIR_ARCH = "data/cache/llm/architecture"
 _CACHE_DIR_CMP  = "data/cache/llm/comparison"
 
@@ -54,6 +56,9 @@ _ARCH_SCHEMA = """
   "top_level_taxonomy": ["3-7 top-level categories the survey uses"],
   "second_level_taxonomy": {
     "<top-level category>": ["sub-category 1", "sub-category 2"]
+  },
+  "taxonomy_glossary": {
+    "<every taxonomy category and sub-category name above>": "1-2 sentence plain-language explanation of what this concept IS and how this survey uses it, so a newcomer understands it without reading the paper"
   },
   "covered_tasks": ["NLP/ML/CV tasks explicitly covered"],
   "covered_methods": ["algorithms or model families explicitly covered"],
@@ -73,7 +78,11 @@ _ARCH_SYSTEM = (
     "not to summarise what it says, but to describe HOW it organises its field. "
     "Return ONLY valid JSON matching the schema given. "
     "Be concrete and specific. Do not invent information not present in the input. "
-    "Use empty lists [] for fields where information is unavailable."
+    "Use empty lists [] for fields where information is unavailable. "
+    "taxonomy_glossary must include an entry for EVERY name that appears in "
+    "top_level_taxonomy and second_level_taxonomy — a short, clear definition a "
+    "newcomer can understand. These explanations may draw on well-known meanings "
+    "of the terms; keep each to 1-2 sentences."
 )
 
 # ---------------------------------------------------------------------------
@@ -188,9 +197,13 @@ class ArchitectureAnalyzer:
         return results
 
     def _analyze_one(self, paper: Paper, summary: PaperSummary, parsed=None) -> PaperArchitecture:
-        # Cache key: title + abstract + taxonomy (taxonomy changes if summary is re-run)
+        # Cache key: title + abstract + taxonomy (taxonomy changes if summary is re-run).
+        # The schema version is included so adding fields (e.g. taxonomy_glossary)
+        # invalidates stale cache entries and forces a fresh extraction.
         taxonomy_sig = "|".join(sorted(summary.taxonomy[:8]))
-        cache_key = LLMCache.make_key(paper.title, paper.abstract or "", taxonomy_sig, _MODEL)
+        cache_key = LLMCache.make_key(
+            paper.title, paper.abstract or "", taxonomy_sig, _MODEL, _ARCH_SCHEMA_VERSION
+        )
         cached = self._arch_cache.get(cache_key)
         if cached is not None:
             logger.info("  ↩ cache hit — skipping arch analysis for '%s'", paper.title[:70])
@@ -414,6 +427,11 @@ def _build_architecture(title: str, data: dict) -> PaperArchitecture:
         organizational_logic=str(data.get("organizational_logic", "")),
         top_level_taxonomy=_as_list(data.get("top_level_taxonomy")),
         second_level_taxonomy=_as_str_dict(data.get("second_level_taxonomy")),
+        taxonomy_glossary={
+            str(k): str(v)
+            for k, v in (data.get("taxonomy_glossary") or {}).items()
+            if str(v).strip()
+        },
         covered_tasks=_as_list(data.get("covered_tasks")),
         covered_methods=_as_list(data.get("covered_methods")),
         covered_datasets=_as_list(data.get("covered_datasets")),

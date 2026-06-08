@@ -751,6 +751,18 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .fmn-d0{background:var(--accent);color:#fff;border-color:#1d4ed8;font-weight:700;font-size:16px}
   .fmn-d1{background:#eff6ff;color:#1e3a8a;border-color:#93c5fd;font-weight:700;font-size:14.5px}
   .fmn-d2{background:#f8fafc;color:#334155;border-color:#e2e8f0;font-size:14px}
+  .fmn-info{border-style:solid;border-color:#bfdbfe}
+  .fmn-info:hover{background:#eff6ff;border-color:var(--accent)}
+  .fmn-i{color:var(--accent);font-size:.85em;opacity:.7}
+  .info-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);
+    z-index:50;align-items:center;justify-content:center;padding:1rem}
+  .info-card{background:#fff;border-radius:12px;max-width:560px;width:100%;
+    padding:1.4rem 1.6rem;box-shadow:0 10px 40px rgba(0,0,0,.25);position:relative}
+  .info-title{margin:0 1.6rem .6rem 0;font-size:1.05rem;color:#0f172a}
+  .info-body{margin:0;line-height:1.55;color:#334155;white-space:pre-wrap}
+  .info-x{position:absolute;top:.5rem;right:.7rem;border:none;background:none;
+    font-size:1.5rem;line-height:1;color:#94a3b8;cursor:pointer}
+  .info-x:hover{color:#0f172a}
   .fm-hint{align-self:center;color:var(--muted);font-size:.8rem;margin-left:.3rem}
   .ft-view{position:relative;overflow-x:auto}
   .ft-lines{position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:3}
@@ -809,9 +821,29 @@ document.querySelectorAll("code.language-mermaid").forEach(function(c){
   c.parentElement.replaceWith(d);
 });
 
+// Shared popup that explains a taxonomy node ("what this is") on click.
+function openInfoPopup(title, body){
+  var bk=document.getElementById("info-popup");
+  if(!bk){
+    bk=document.createElement("div"); bk.id="info-popup"; bk.className="info-backdrop";
+    bk.innerHTML='<div class="info-card" role="dialog" aria-modal="true">'+
+      '<button class="info-x" aria-label="Close">×</button>'+
+      '<h4 class="info-title"></h4><p class="info-body"></p></div>';
+    document.body.appendChild(bk);
+    var close=function(){ bk.style.display="none"; };
+    bk.addEventListener("click",function(e){ if(e.target===bk) close(); });
+    bk.querySelector(".info-x").addEventListener("click",close);
+    document.addEventListener("keydown",function(e){ if(e.key==="Escape") close(); });
+  }
+  bk.querySelector(".info-title").textContent=title;
+  bk.querySelector(".info-body").textContent=body;
+  bk.style.display="flex";
+}
+
 // 3. Reusable interactive box-tree renderer (Field Map + per-paper taxonomies).
 //    Every node is an HTML box (foreignObject → wrapping div) — full text, no
-//    truncation, bold names via data.html. Click a node to expand/collapse.
+//    truncation, bold names via data.html. Click a node to expand/collapse;
+//    leaves that carry an explanation open an info popup instead.
 function renderBoxTree(holder, DATA, opts){
   opts = opts || {};
   var initialDepth = (opts.initialDepth==null ? 1 : opts.initialDepth);
@@ -832,18 +864,25 @@ function renderBoxTree(holder, DATA, opts){
   holder.appendChild(svg.node());
 
   function escHtml(s){ var e=document.createElement("div"); e.textContent=s; return e.innerHTML; }
-  function depthClass(d){ return "fmn fmn-d"+Math.min(d.depth,2); }
-  function nodeHtml(d){ var m=(d._children?(d.children?"▾ ":"▸ "):""); return escHtml(m)+(d.data.html?d.data.html:escHtml(d.data.label)); }
+  function hasInfo(d){ return !d._children && d.data.desc; }   // leaf with an explanation
+  function depthClass(d){ return "fmn fmn-d"+Math.min(d.depth,2)+(hasInfo(d)?" fmn-info":""); }
+  function nodeHtml(d){
+    var m=(d._children?(d.children?"▾ ":"▸ "):"");
+    return escHtml(m)+(d.data.html?d.data.html:escHtml(d.data.label))+(hasInfo(d)?' <span class="fmn-i">ⓘ</span>':"");
+  }
 
   function update(){
     var nodes=root.descendants(), links=root.links();
     var node=gNode.selectAll("g.fmn-g").data(nodes,function(d){return d.id;});
     node.exit().remove();
     var enter=node.enter().append("g").attr("class","fmn-g")
-      .on("click",function(e,d){ if(d._children){ d.children=d.children?null:d._children; update(); } });
+      .on("click",function(e,d){
+        if(d._children){ d.children=d.children?null:d._children; update(); }
+        else if(d.data.desc){ openInfoPopup(d.data.label, d.data.desc); }
+      });
     enter.append("foreignObject").append("xhtml:div");
     var all=enter.merge(node);
-    all.style("cursor",function(d){return d._children?"pointer":"default";});
+    all.style("cursor",function(d){return (d._children||hasInfo(d))?"pointer":"default";});
     all.select("div").attr("class",depthClass).html(nodeHtml);
     all.select("foreignObject").attr("width",MAXW).attr("height",4000);
     all.each(function(d){ var div=this.querySelector("div"); div.style.width=""; d.bw=Math.min(MAXW, Math.ceil(div.getBoundingClientRect().width)+1); });
@@ -1999,6 +2038,7 @@ def _render_part4_paper_cards(
                     _short_title(p.title),
                     arch.top_level_taxonomy,
                     arch.second_level_taxonomy,
+                    glossary=arch.taxonomy_glossary,
                 )
                 payload = _html_attr(json.dumps(tree, ensure_ascii=False))
                 lines.append(f'<div class="taxtree" data-tax="{payload}"></div>')
@@ -2828,14 +2868,33 @@ def _taxonomy_tree_data(
     root_label: str,
     top_level: list[str],
     second_level: dict[str, list[str]],
+    glossary: dict[str, str] | None = None,
     max_top: int = 8,
     max_sub: int = 6,
 ) -> dict:
-    """A survey's taxonomy as nested {label, children} for the interactive tree."""
+    """
+    A survey's taxonomy as nested {label, children, desc} for the interactive
+    tree. `desc` (from the LLM glossary) is the plain-language "what this is"
+    explanation shown in the click popup; matched to node names case-insensitively.
+    """
+    gloss = {str(k).strip().lower(): str(v) for k, v in (glossary or {}).items()}
+
+    def desc_for(name: str) -> str:
+        return gloss.get(str(name).strip().lower(), "")
+
     cats: list[dict] = []
     for cat in top_level[:max_top]:
-        subs = [{"label": str(s)} for s in (second_level.get(cat, []) or [])[:max_sub]]
+        subs = []
+        for s in (second_level.get(cat, []) or [])[:max_sub]:
+            sub: dict = {"label": str(s)}
+            d = desc_for(s)
+            if d:
+                sub["desc"] = d
+            subs.append(sub)
         node: dict = {"label": str(cat)}
+        d = desc_for(cat)
+        if d:
+            node["desc"] = d
         if subs:
             node["children"] = subs
         cats.append(node)

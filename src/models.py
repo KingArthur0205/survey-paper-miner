@@ -174,6 +174,9 @@ class PaperArchitecture(BaseModel):
 
     top_level_taxonomy: list[str] = Field(default_factory=list)
     second_level_taxonomy: dict[str, list[str]] = Field(default_factory=dict)
+    # Plain-language explanation of each taxonomy node (name → "what it is"),
+    # shown in the report's interactive taxonomy tree popups.
+    taxonomy_glossary: dict[str, str] = Field(default_factory=dict)
 
     covered_tasks: list[str] = Field(default_factory=list)
     covered_methods: list[str] = Field(default_factory=list)
