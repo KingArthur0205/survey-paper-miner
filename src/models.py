@@ -286,6 +286,38 @@ class ConceptGraph(BaseModel):
     failure_reason: str = ""
 
 
+class SystemComponent(BaseModel):
+    """One building block inside a system-design layer."""
+
+    name: str
+    description: str = ""   # plain-language "what it is / does"
+
+
+class SystemLayer(BaseModel):
+    """A subsystem / layer in the field's top-down system design."""
+
+    name: str
+    role: str = ""          # one sentence: what this layer is responsible for
+    components: list[SystemComponent] = Field(default_factory=list)
+
+
+class SystemDesign(BaseModel):
+    """
+    A top-down system architecture of a research field, synthesised from the
+    surveys: ordered layers (input → output / high-level → foundation) plus
+    cross-cutting concerns, so a newcomer can understand the field as a system.
+    """
+
+    topic: str = ""
+    overview: str = ""
+    layers: list[SystemLayer] = Field(default_factory=list)
+    cross_cutting: list[SystemLayer] = Field(default_factory=list)
+    data_flow: str = ""
+
+    extraction_failed: bool = False
+    failure_reason: str = ""
+
+
 class LandmarkPaper(BaseModel):
     """
     A seminal *primary* paper (not a survey) that the analysed surveys

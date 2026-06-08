@@ -31,7 +31,6 @@ from datetime import date
 from pathlib import Path
 
 from .models import (
-    ConceptGraph,
     FieldGuide,
     FieldMegaArchitecture,
     JudgeResult,
@@ -39,6 +38,7 @@ from .models import (
     Paper,
     PaperArchitecture,
     PaperSummary,
+    SystemDesign,
     ReadingPath,
     ScoredPaper,
 )
@@ -302,7 +302,7 @@ class Exporter:
         mega: FieldMegaArchitecture,
         judge_map: dict[str, JudgeResult] | None = None,
         reading_path: "ReadingPath | None" = None,
-        concept_graph: "ConceptGraph | None" = None,
+        system_design: "SystemDesign | None" = None,
         landmarks: "list[LandmarkPaper] | None" = None,
         field_map_style: str = "outline",
     ) -> Path:
@@ -311,7 +311,7 @@ class Exporter:
 
         Part 1 — Field Architecture (mega-arch, Mermaid, gaps)
         Part 2 — Survey Navigator   (orientation map, coverage matrix, reading path)
-        Part 3 — Concept Graph      (node/edge listing; only when concept_graph is provided)
+        Part 3 — System Design      (top-down layered architecture of the field)
         Part 4 — Paper Cards        (one card per paper, with anchor IDs)
 
         All cross-references inside the file use Markdown anchor links so the
@@ -320,7 +320,7 @@ class Exporter:
         path = self._report_path(topic, "md")
         md = _build_report_markdown(
             topic, arch_triples, mega, judge_map, reading_path,
-            concept_graph, landmarks, field_map_style,
+            system_design, landmarks, field_map_style,
         )
         path.write_text(md, encoding="utf-8")
         logger.info("Architecture report exported: %s (%d papers)", path, len(arch_triples))
@@ -333,7 +333,7 @@ class Exporter:
         mega: FieldMegaArchitecture,
         judge_map: dict[str, JudgeResult] | None = None,
         reading_path: "ReadingPath | None" = None,
-        concept_graph: "ConceptGraph | None" = None,
+        system_design: "SystemDesign | None" = None,
         landmarks: "list[LandmarkPaper] | None" = None,
     ) -> Path:
         """
@@ -345,38 +345,40 @@ class Exporter:
         # so the HTML page can inject the interactive (outline/diagram) tabs.
         body_md = _build_report_markdown(
             topic, arch_triples, mega, judge_map, reading_path,
-            concept_graph, landmarks, field_map_style="__slot__",
+            system_design, landmarks, field_map_style="__slot__",
         )
         field_map_tree = _field_map_tree_data(mega)
         field_tree = _field_tree_html_data(mega)
         problem_tree = _problem_tree_html_data(mega)
+        system_design_data = _system_design_html_data(system_design)
 
         html = _build_html_report(
             topic, body_md, field_map_tree, field_tree, problem_tree,
+            system_design_data,
         )
         path = self._report_path(topic, "html")
         path.write_text(html, encoding="utf-8")
         logger.info("HTML report exported: %s", path)
         return path
 
-    def export_concept_graph_json(
+    def export_system_design_json(
         self,
         topic: str,
-        graph: "ConceptGraph",
+        design: "SystemDesign",
     ) -> "Path | None":
-        """Write ConceptGraph as JSON.  Returns None if extraction failed."""
-        if graph.extraction_failed:
+        """Write SystemDesign as JSON.  Returns None if synthesis failed."""
+        if design.extraction_failed:
             logger.warning(
-                "Skipping concept graph JSON for '%s' — extraction failed: %s",
-                topic, graph.failure_reason,
+                "Skipping system-design JSON for '%s' — synthesis failed: %s",
+                topic, design.failure_reason,
             )
             return None
-        path = self._topic_dir(topic) / "concept_graph.json"
+        path = self._topic_dir(topic) / "system_design.json"
         path.write_text(
-            json.dumps(graph.model_dump(), ensure_ascii=False, indent=2),
+            json.dumps(design.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        logger.info("Concept graph JSON exported: %s (%d nodes, %d edges)", path, len(graph.nodes), len(graph.edges))
+        logger.info("System design JSON exported: %s (%d layers)", path, len(design.layers))
         return path
 
     def export_reading_path_json(
@@ -688,25 +690,25 @@ def _build_report_markdown(
     mega: FieldMegaArchitecture,
     judge_map: dict[str, JudgeResult] | None,
     reading_path: "ReadingPath | None",
-    concept_graph: "ConceptGraph | None",
+    system_design: "SystemDesign | None",
     landmarks: "list[LandmarkPaper] | None",
     field_map_style: str,
 ) -> str:
     """Assemble the full report markdown (shared by the .md and .html exports)."""
-    show_concept_graph = bool(concept_graph and not concept_graph.extraction_failed)
+    show_system_design = bool(system_design and not system_design.extraction_failed)
     html_mode = field_map_style == "__slot__"   # the HTML export uses the slot signal
     lines: list[str] = []
     lines += _render_part1_field_architecture(
         topic, mega, arch_triples,
         has_landmarks=bool(landmarks),
-        has_concept_graph=show_concept_graph,
+        has_system_design=show_system_design,
         field_map_style=field_map_style,
     )
     lines += _render_part2_survey_navigator(topic, arch_triples, mega, reading_path)
     if landmarks:
         lines += _render_landmark_papers(landmarks)
-    if show_concept_graph:
-        lines += _render_part3_concept_graph(concept_graph)
+    if show_system_design:
+        lines += _render_part3_system_design(system_design, html_mode=html_mode)
     lines += _render_part4_paper_cards(arch_triples, judge_map, html_mode=html_mode)
     return "\n".join(lines)
 
@@ -714,7 +716,7 @@ def _build_report_markdown(
 # Self-contained HTML report. marked.js renders the Markdown, mermaid.js renders
 # the in-body diagrams (paper-card taxonomies, concept map), and the Field Map
 # slot gets an interactive collapsible tree built from __FIELD_MAP_TREE__.
-# Substituted: __TITLE__/__REPORT_MD__/__FIELD_MAP_TREE__/__FIELD_TREE__/__PROBLEM_TREE__.
+# Substituted: __TITLE__/__REPORT_MD__/__FIELD_MAP_TREE__/__FIELD_TREE__/__PROBLEM_TREE__/__SYSTEM_DESIGN__.
 _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -763,6 +765,30 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
   .info-x{position:absolute;top:.5rem;right:.7rem;border:none;background:none;
     font-size:1.5rem;line-height:1;color:#94a3b8;cursor:pointer}
   .info-x:hover{color:#0f172a}
+  /* System Design — layered architecture */
+  .sd-wrap{display:flex;gap:1.1rem;align-items:stretch;flex-wrap:wrap}
+  .sd-main{flex:1;min-width:300px;display:flex;flex-direction:column}
+  .sd-layer{border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;background:#fff}
+  .sd-layer-h{font-weight:700;font-size:1rem;color:#0f172a}
+  .sd-layer-role{color:var(--muted);font-size:.85rem;margin-top:.15rem}
+  .sd-comps{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:.55rem}
+  .sd-chip{display:inline-block;border:1px solid var(--border);background:#f8fafc;
+    border-radius:999px;padding:.28rem .75rem;font-size:.86rem;color:#334155}
+  .sd-chip.sd-info{cursor:pointer;border-color:#bfdbfe}
+  .sd-chip.sd-info:hover{background:#eff6ff;border-color:var(--accent)}
+  .sd-arrow{align-self:center;color:#94a3b8;font-size:1.25rem;line-height:1;margin:.15rem 0}
+  .sd-l0{background:#eff6ff;border-color:#bfdbfe}
+  .sd-l1{background:#f0f9ff;border-color:#bae6fd}
+  .sd-l2{background:#ecfeff;border-color:#a5f3fc}
+  .sd-l3{background:#f0fdfa;border-color:#99f6e4}
+  .sd-l4{background:#f0fdf4;border-color:#bbf7d0}
+  .sd-l5{background:#fefce8;border-color:#fde68a}
+  .sd-side{width:230px;flex:none;display:flex;flex-direction:column;gap:.6rem}
+  .sd-side-h{font-weight:600;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .sd-cross{background:#faf5ff;border-color:#e9d5ff}
+  .sd-flow{margin:1rem 0 0;color:#334155;background:#f8fafc;border:1px solid var(--border);
+    border-radius:8px;padding:.6rem .9rem;font-size:.92rem}
+  @media(max-width:820px){ .sd-side{width:100%} }
   .fm-hint{align-self:center;color:var(--muted);font-size:.8rem;margin-left:.3rem}
   .ft-view{position:relative;overflow-x:auto}
   .ft-lines{position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:3}
@@ -795,6 +821,7 @@ const REPORT_MD   = __REPORT_MD__;
 const FIELD_MAP_TREE = __FIELD_MAP_TREE__;
 const FIELD_TREE  = __FIELD_TREE__;
 const PROBLEM_TREE = __PROBLEM_TREE__;
+const SYSTEM_DESIGN = __SYSTEM_DESIGN__;
 
 mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
 
@@ -1017,6 +1044,50 @@ function renderLinkedTree(slotId, TREE){
 }
 renderLinkedTree("fieldtree-slot", FIELD_TREE);
 renderLinkedTree("problemtree-slot", PROBLEM_TREE);
+
+// 6. System Design — top-down layered architecture. Layers stack with down
+//    arrows; cross-cutting concerns sit on the side; click a component → popup.
+(function(){
+  var slot=document.getElementById("systemdesign-slot");
+  if(!slot) return;
+  var SD=SYSTEM_DESIGN;
+  if(!SD || !SD.layers || !SD.layers.length){ slot.innerHTML="<p style='color:#6b7280'>—</p>"; return; }
+  function comp(c){
+    var chip=document.createElement("span"); chip.className="sd-chip"; chip.textContent=c.name;
+    if(c.description){
+      chip.classList.add("sd-info");
+      chip.appendChild(Object.assign(document.createElement("span"),{className:"fmn-i",textContent:" ⓘ"}));
+      chip.addEventListener("click",function(){ openInfoPopup(c.name, c.description); });
+    }
+    return chip;
+  }
+  function layerEl(L, cls){
+    var d=document.createElement("div"); d.className="sd-layer "+(cls||"");
+    var h=document.createElement("div"); h.className="sd-layer-h"; h.textContent=L.name; d.appendChild(h);
+    if(L.role){ var r=document.createElement("div"); r.className="sd-layer-role"; r.textContent=L.role; d.appendChild(r); }
+    if(L.components && L.components.length){
+      var cw=document.createElement("div"); cw.className="sd-comps";
+      L.components.forEach(function(c){ cw.appendChild(comp(c)); });
+      d.appendChild(cw);
+    }
+    return d;
+  }
+  var wrap=document.createElement("div"); wrap.className="sd-wrap";
+  var main=document.createElement("div"); main.className="sd-main";
+  SD.layers.forEach(function(L,i){
+    main.appendChild(layerEl(L,"sd-l"+(i%6)));
+    if(i<SD.layers.length-1){ var a=document.createElement("div"); a.className="sd-arrow"; a.textContent="↓"; main.appendChild(a); }
+  });
+  wrap.appendChild(main);
+  if(SD.cross_cutting && SD.cross_cutting.length){
+    var side=document.createElement("div"); side.className="sd-side";
+    var lbl=document.createElement("div"); lbl.className="sd-side-h"; lbl.textContent="Cross-cutting"; side.appendChild(lbl);
+    SD.cross_cutting.forEach(function(L){ side.appendChild(layerEl(L,"sd-cross")); });
+    wrap.appendChild(side);
+  }
+  slot.innerHTML=""; slot.appendChild(wrap);
+  if(SD.data_flow){ var f=document.createElement("p"); f.className="sd-flow"; f.innerHTML="<strong>Data flow:</strong> "; f.appendChild(document.createTextNode(SD.data_flow)); slot.appendChild(f); }
+})();
 </script>
 </body>
 </html>
@@ -1026,6 +1097,7 @@ renderLinkedTree("problemtree-slot", PROBLEM_TREE);
 def _build_html_report(
     topic: str, body_md: str, field_map_tree: dict | None = None,
     field_tree: dict | None = None, problem_tree: dict | None = None,
+    system_design: dict | None = None,
 ) -> str:
     """Fill the HTML template, JSON-encoding the strings for safe embedding."""
     def js(s: str) -> str:
@@ -1042,6 +1114,7 @@ def _build_html_report(
         .replace("__FIELD_MAP_TREE__", jsdata(field_map_tree, {"children": []}))
         .replace("__FIELD_TREE__", jsdata(field_tree))
         .replace("__PROBLEM_TREE__", jsdata(problem_tree))
+        .replace("__SYSTEM_DESIGN__", jsdata(system_design, {"layers": []}))
     )
 
 
@@ -1536,7 +1609,7 @@ def _render_part1_field_architecture(
     mega: FieldMegaArchitecture,
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
     has_landmarks: bool = False,
-    has_concept_graph: bool = False,
+    has_system_design: bool = False,
     field_map_style: str = "outline",
 ) -> list[str]:
     n = len(mega.source_papers)
@@ -1563,11 +1636,8 @@ def _render_part1_field_architecture(
         "  - [Reading Guide](#reading-guide-where-to-start)",
         *(["- [Landmark Papers](#landmark-papers)"] if has_landmarks else []),
         *([
-            "- [Part 3 — Concept Graph](#part-3--concept-graph)",
-            "  - [Concepts](#concepts)",
-            "  - [Concept Map](#concept-map)",
-            "  - [How Concepts Relate](#how-concepts-relate)",
-        ] if has_concept_graph else []),
+            "- [Part 3 — System Design](#part-3--system-design)",
+        ] if has_system_design else []),
         "- [Part 4 — Paper Cards](#part-4--paper-cards)",
         "",
         "---",
@@ -2188,75 +2258,76 @@ def _render_landmark_papers(landmarks: list["LandmarkPaper"]) -> list[str]:
     return lines
 
 
-def _render_part3_concept_graph(graph: "ConceptGraph") -> list[str]:
-    """Render Part 3 — Concept Graph: concepts table + map + readable relationships."""
+def _render_part3_system_design(design: "SystemDesign", html_mode: bool = False) -> list[str]:
+    """
+    Render Part 3 — System Design: a top-down layered architecture of the field.
+    In HTML the layers are drawn as an interactive diagram (click a component for
+    its explanation); in Markdown they render as ordered layer sections.
+    """
     lines: list[str] = [
         "---",
         "",
-        "## Part 3 — Concept Graph",
+        "## Part 3 — System Design",
         "",
-        f"*{len(graph.nodes)} concepts · {len(graph.edges)} typed relationships*",
+        "*A top-down view of the field as one system — read it top to bottom to "
+        "understand how the pieces fit together.*",
         "",
     ]
+    if design.overview:
+        lines += [design.overview, ""]
 
-    node_name_map = {n.node_id: n.name for n in graph.nodes}
+    if html_mode:
+        # The interactive layered diagram is injected here from SYSTEM_DESIGN.
+        lines += ['<div id="systemdesign-slot"></div>', ""]
+        return lines
 
-    # ── Concepts table (Name + Definition only) ──────────────────────────
-    if graph.nodes:
-        lines += ["### Concepts", ""]
-        lines.append("| Name | Definition |")
-        lines.append("|---|---|")
-        for node in graph.nodes:
-            safe_def = (node.definition or "").replace("|", "\\|")
-            lines.append(f"| **{node.name}** | {safe_def} |")
+    # ── Markdown: layers as ordered sections, with a downward arrow between ──
+    for i, layer in enumerate(design.layers):
+        lines.append(f"### {i + 1}. {layer.name}")
+        if layer.role:
+            lines += [f"*{layer.role}*", ""]
+        if layer.components:
+            lines.append("| Component | What it is |")
+            lines.append("|---|---|")
+            for c in layer.components:
+                safe = (c.description or "").replace("|", "\\|")
+                lines.append(f"| **{c.name}** | {safe} |")
+        lines.append("")
+        if i < len(design.layers) - 1:
+            lines += ["↓", ""]
+
+    if design.cross_cutting:
+        lines += ["### Cross-cutting concerns",
+                  "*Span every layer above.*", ""]
+        for layer in design.cross_cutting:
+            comps = ", ".join(f"**{c.name}**" for c in layer.components) or ""
+            role = f" — {layer.role}" if layer.role else ""
+            lines.append(f"- **{layer.name}**{role}" + (f": {comps}" if comps else ""))
         lines.append("")
 
-    # ── Concept map (visual overview) ─────────────────────────────────────
-    if graph.edges:
-        lines += ["### Concept Map", ""]
-        lines.append(
-            "Arrows are labelled with the relationship type. "
-            "See *How concepts relate* below for the full list with evidence."
-        )
-        lines.append("")
-        lines += _concept_graph_mermaid(graph, node_name_map)
-        lines.append("")
-
-    # ── Readable, grouped relationship list ───────────────────────────────
-    if graph.edges:
-        lines += ["### How concepts relate", ""]
-
-        from collections import defaultdict as _dd
-        by_type: dict[str, list] = _dd(list)
-        for edge in graph.edges:
-            by_type[edge.edge_type].append(edge)
-
-        # Known types first (in defined order), then any unexpected types
-        ordered_types = [t for t in _EDGE_ORDER if t in by_type]
-        ordered_types += [t for t in sorted(by_type) if t not in _EDGE_META]
-
-        for etype in ordered_types:
-            edges = by_type[etype]
-            meta = _EDGE_META.get(etype, {
-                "label": etype.replace("_", " "),
-                "heading": etype.replace("_", " ").title(),
-                "explains": "",
-            })
-            lines.append(f"#### {meta['heading']}")
-            if meta["explains"]:
-                lines.append(f"*{meta['explains']}*")
-            lines.append("")
-            for e in edges:
-                src = node_name_map.get(e.source_id, e.source_id)
-                tgt = node_name_map.get(e.target_id, e.target_id)
-                stmt = f"- **{src}** {meta['label']} **{tgt}**"
-                if e.evidence:
-                    ev = e.evidence.strip().rstrip(".")
-                    stmt += f" — {ev}."
-                lines.append(stmt)
-            lines.append("")
+    if design.data_flow:
+        lines += [f"**Data flow:** {design.data_flow}", ""]
 
     return lines
+
+
+def _system_design_html_data(design: "SystemDesign | None") -> dict:
+    """JSON-able SystemDesign for the interactive (HTML) layered diagram."""
+    if not design or design.extraction_failed:
+        return {"layers": []}
+
+    def layer(L) -> dict:
+        return {
+            "name": L.name, "role": L.role,
+            "components": [{"name": c.name, "description": c.description} for c in L.components],
+        }
+
+    return {
+        "overview": design.overview,
+        "layers": [layer(L) for L in design.layers],
+        "cross_cutting": [layer(L) for L in design.cross_cutting],
+        "data_flow": design.data_flow,
+    }
 
 
 def _concept_graph_mermaid(

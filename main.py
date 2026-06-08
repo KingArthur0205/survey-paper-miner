@@ -180,9 +180,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip PDF full-text parsing (no pdfplumber required)",
     )
     parser.add_argument(
-        "--no-concept-graph",
+        "--no-system-design",
+        "--no-concept-graph",       # backwards-compatible alias
+        dest="no_system_design",
         action="store_true",
-        help="Skip typed concept graph extraction",
+        help="Skip the top-down system-design synthesis (Part 3)",
     )
     parser.add_argument(
         "--no-reading-path",
@@ -744,9 +746,9 @@ def _run_analyze_steps(
             logger.info("Skipping architecture analysis (--no-architecture).")
 
     # ------------------------------------------------------------------ #
-    # 9. Concept graph + reading path + landmarks (per topic)             #
+    # 9. System design + reading path + landmarks (per topic)            #
     # ------------------------------------------------------------------ #
-    concept_graphs: dict[str, object] = {}
+    system_designs: dict[str, object] = {}
     reading_paths: dict[str, object] = {}
     landmarks_by_topic: dict[str, list] = {}
 
@@ -765,15 +767,15 @@ def _run_analyze_steps(
                 if jr:
                     topic_judge_triples.append((sp, summary, jr))
 
-        # 9. Concept graph
-        if not args.no_concept_graph and cfg.anthropic_api_key and not mega.synthesis_failed:
+        # 9. System design (top-down architecture of the field)
+        if not args.no_system_design and cfg.anthropic_api_key and not mega.synthesis_failed:
             try:
-                from src.concept_graph import ConceptGraphExtractor
-                extractor = ConceptGraphExtractor(cfg)
-                cg = extractor.extract(topic_key, mega, triples)
-                concept_graphs[topic_key] = cg
+                from src.system_design import SystemDesignSynthesizer
+                synth = SystemDesignSynthesizer(cfg)
+                sd = synth.synthesize(topic_key, mega, triples)
+                system_designs[topic_key] = sd
             except Exception as exc:
-                logger.warning("[concept_graph] Failed for '%s': %s", topic_key, exc)
+                logger.warning("[system_design] Failed for '%s': %s", topic_key, exc)
 
         # 9b. Reading path
         if not args.no_reading_path and cfg.anthropic_api_key and topic_judge_triples:
@@ -825,14 +827,14 @@ def _run_analyze_steps(
     arch_report_paths = []
     for topic_key, (triples, mega) in arch_triples_by_topic.items():
         rp = reading_paths.get(topic_key)
-        cg = concept_graphs.get(topic_key)
+        sd = system_designs.get(topic_key)
         lms = landmarks_by_topic.get(topic_key)
 
         rpt = exporter.export_architecture_report(
             topic_key, triples, mega,
             judge_map=judge_map or None,
             reading_path=rp,
-            concept_graph=cg,
+            system_design=sd,
             landmarks=lms,
             field_map_style=cfg.field_map_style,
         )
@@ -844,7 +846,7 @@ def _run_analyze_steps(
                 topic_key, triples, mega,
                 judge_map=judge_map or None,
                 reading_path=rp,
-                concept_graph=cg,
+                system_design=sd,
                 landmarks=lms,
             )
             arch_report_paths.append(html_rpt)
@@ -866,10 +868,10 @@ def _run_analyze_steps(
         if html_path:
             arch_report_paths.append(html_path)
 
-        if cg:
-            cg_path = exporter.export_concept_graph_json(topic_key, cg)
-            if cg_path:
-                arch_report_paths.append(cg_path)
+        if sd:
+            sd_path = exporter.export_system_design_json(topic_key, sd)
+            if sd_path:
+                arch_report_paths.append(sd_path)
 
         if rp:
             rp_path = exporter.export_reading_path_json(topic_key, rp)
@@ -884,8 +886,8 @@ def _run_analyze_steps(
         print(f"  Papers judged:     {len(judge_map)}")
     if arch_triples_by_topic:
         print(f"  Topics analysed:   {len(arch_triples_by_topic)}")
-    if concept_graphs:
-        print(f"  Concept graphs:    {len(concept_graphs)}")
+    if system_designs:
+        print(f"  System designs:    {len(system_designs)}")
     if reading_paths:
         print(f"  Reading paths:     {len(reading_paths)}")
     if landmarks_by_topic:

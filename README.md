@@ -1,6 +1,6 @@
 # AI Survey Paper Miner
 
-Automatically discovers, scores, and deeply analyses AI survey papers from OpenAlex and CORE. Given a list of research topics it retrieves papers, filters out non-surveys, ranks them by quality, and runs a suite of LLM passes to produce a structured literature review with architecture analysis, concept graphs, and a guided reading path.
+Automatically discovers, scores, and deeply analyses AI survey papers from OpenAlex and CORE. Given a list of research topics it retrieves papers, filters out non-surveys, ranks them by quality, and runs a suite of LLM passes to produce a structured literature review with architecture analysis, a top-down system design, and a guided reading path.
 
 > 📐 **Architecture & pipeline diagrams + why each module exists:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -77,7 +77,7 @@ data/exports/computer-vision_2026-05-28/
     ├── mindmap.html            ← interactive mindmap (double-click → browser)
     ├── architecture.json       ← machine-readable mega-architecture
     ├── architecture.mmd        ← Mermaid source of the field diagram
-    ├── concept_graph.json      ← typed concept graph
+    ├── system_design.json      ← top-down system design (layers + components)
     └── reading_path.json       ← sequenced newcomer reading list
 
 > With several topics in one run, the reports are slug-prefixed
@@ -85,7 +85,7 @@ data/exports/computer-vision_2026-05-28/
 ```
 
 The report comes in **two formats with the same content** — pick whichever you prefer:
-- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map is a **collapsible tree** (the topic and its categories show first; click a category to expand its items, or use Expand/Collapse all), and the **Field Tree** (problem-solving chain: Core Problems → Topic → Research Areas → Methods → Techniques) and **Problem Tree** (problem-exposing chain: Research Areas → Challenges → Research Gaps) both let you click any item to highlight what it links to.
+- **`report.html`** — just double-click; opens in your browser, no tools needed. The Field Map is a **collapsible tree** (the topic and its categories show first; click a category to expand its items, or use Expand/Collapse all), and the **Field Tree** (problem-solving chain: Core Problems → Research Areas → Methods → Techniques) and **Problem Tree** (problem-exposing chain: Research Areas → Challenges → Research Gaps) both let you click any item to highlight what it links to.
 - **`report.md`** — the Markdown version, best if you read in GitHub / VS Code / Obsidian.
 
 > **Two trees, two viewpoints.** The **Field Tree** answers *"how is the field solving its problems?"* (drivers → topic → areas → methods → techniques). The **Problem Tree** answers *"where is the field still stuck?"* (areas → open challenges → research gaps), with speculative *blue-sky* gaps — ideas no current challenge motivates — listed separately. Benchmarks are reported **only when the surveyed papers name them** — none are added from outside knowledge.
@@ -157,12 +157,12 @@ topics.yaml
     │
     ├─ Mega-architecture synthesis  (cross-survey field map per topic)
     │
-    ├─ Concept graph  (typed graph linking key ideas across all surveys)
+    ├─ System design  (top-down layered architecture of the field)
     │
     └─ Reading path  (sequenced newcomer reading list)
 ```
 
-Skip any step with the matching flag: `--no-summarize`, `--no-architecture`, `--no-judge`, `--no-concept-graph`, `--no-reading-path`, `--no-pdf-parse`, `--no-llm-filter`, `--no-llm-queries`.
+Skip any step with the matching flag: `--no-summarize`, `--no-architecture`, `--no-judge`, `--no-system-design`, `--no-reading-path`, `--no-pdf-parse`, `--no-llm-filter`, `--no-llm-queries`.
 
 ---
 
@@ -188,7 +188,7 @@ A typical full run (3 topics, 50 results/query) costs roughly:
 | Relevance filter | Haiku | ~$0.02–0.05 |
 | Summarisation | Sonnet | ~$0.10–0.30 |
 | Architecture analysis | Sonnet | ~$0.20–0.60 |
-| Concept graph + Reading path | Sonnet | ~$0.05–0.15 |
+| System design + Reading path | Sonnet | ~$0.05–0.15 |
 
 LLM results (summaries, judge, architecture) are cached locally so re-running the analysis pass on the same papers costs nothing.
 
