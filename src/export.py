@@ -1304,27 +1304,28 @@ def _field_tree_background(mega: FieldMegaArchitecture) -> list[str]:
 
 def _render_field_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
     """
-    Static (Markdown) Field Tree — the full 5-level problem-solving chain:
-        Core Problems → Topic → Research Areas → Methods → Techniques
+    Static (Markdown) Field Tree — the problem-solving chain (Topic node omitted):
+        Core Problems → Research Areas → Methods → Techniques
     """
     task_method, method_tech = _field_tree_pairs(mega)
     bg = _field_tree_background(mega)
     out: list[str] = []
 
     if bg:
-        out.append("- **Core Problems** *(drivers — many converge onto the topic)*")
+        out.append("- **Core Problems** *(what drives the field)*")
         for b in bg:
             out.append(f"  - {b}")
-    out.append(f"- **{mega.topic}** *(the topic these drivers motivate)*")
 
     if task_method:
+        out.append("- **Research Areas** *(how the core problems are studied)*")
         for task, methods in task_method.items():
-            out.append(f"  - **{task}** *(research area)*")
+            out.append(f"  - **{task}**")
             for m in methods:
                 techs = method_tech.get(m, [])
                 tail = f" — {', '.join(techs[:5])}" if techs else ""
                 out.append(f"    - {m}{tail}")
     elif method_tech:  # fallback: no task→method links, just method → techniques
+        out.append("- **Methods**")
         for m, techs in method_tech.items():
             out.append(f"  - {m}" + (f" — {', '.join(techs[:5])}" if techs else ""))
 
@@ -1334,26 +1335,23 @@ def _render_field_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
 def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     """
     JSON-able data for the interactive (HTML) two-column linked view, covering
-    every adjacent layer of the 5-level chain:
-        Core Problems ↔ Topic ↔ Research Areas ↔ Methods ↔ Techniques
+    each adjacent layer of the chain (the Topic node is omitted — Core Problems
+    connect straight to the Research Areas they motivate):
+        Core Problems ↔ Research Areas ↔ Methods ↔ Techniques
     """
     task_method, method_tech = _field_tree_pairs(mega)
-    topic = mega.topic
     bg = _field_tree_background(mega)        # full text — the linked view wraps boxes
 
     pairs: list[dict] = []
-    if bg:
+    if bg and task_method:
+        areas = list(task_method.keys())
         pairs.append({
-            "key": "bg-topic", "leftLabel": "Core Problems", "rightLabel": "Topic",
-            "links": {b: [topic] for b in bg},
+            "key": "problem-area", "leftLabel": "Core Problems", "rightLabel": "Research Areas",
+            "links": {b: areas for b in bg},   # the core problems collectively motivate the areas
         })
     if task_method:
         pairs.append({
-            "key": "topic-area", "leftLabel": "Topic", "rightLabel": "Research Areas",
-            "links": {topic: list(task_method.keys())},
-        })
-        pairs.append({
-            "key": "task-method", "leftLabel": "Research Areas", "rightLabel": "Methods",
+            "key": "area-method", "leftLabel": "Research Areas", "rightLabel": "Methods",
             "links": task_method,
         })
     if method_tech:
@@ -1582,9 +1580,9 @@ def _render_part1_field_architecture(
         "",
         "### Field Tree",
         "",
-        "> The problem-solving chain: **Core Problems → Topic → Research Areas → Methods → "
-        "Techniques**. (Core problems converge onto the topic; the "
-        "topic unfolds into research areas, methods, and techniques.)",
+        "> The problem-solving chain: **Core Problems → Research Areas → Methods → "
+        "Techniques**. (The core problems motivate the research areas, which use "
+        "methods, which are realised by techniques.)",
         "",
     ]
     if style == "__slot__":
