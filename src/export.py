@@ -142,12 +142,24 @@ class Exporter:
     def __init__(self, output_dir: str | Path):
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        # Set by the caller before exporting: when True, report files are
+        # slug-prefixed so multiple topics don't overwrite each other at the root.
+        self.multi_topic = False
 
     def _topic_dir(self, topic: str) -> Path:
         """Return (and create) a per-topic sub-folder inside the run directory."""
         d = self._output_dir / _topic_slug(topic)
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def _report_path(self, topic: str, ext: str) -> Path:
+        """
+        Path for report.md / report.html — kept at the run ROOT, beside
+        papers_ranked.xlsx. Prefixed with the topic slug only when the run
+        covers several topics (so they don't collide).
+        """
+        name = f"{_topic_slug(topic)}-report.{ext}" if self.multi_topic else f"report.{ext}"
+        return self._output_dir / name
 
     # ------------------------------------------------------------------
     # Public API
@@ -305,7 +317,7 @@ class Exporter:
         All cross-references inside the file use Markdown anchor links so the
         user can click between sections in any Markdown viewer.
         """
-        path = self._topic_dir(topic) / "report.md"
+        path = self._report_path(topic, "md")
         md = _build_report_markdown(
             topic, arch_triples, mega, judge_map, reading_path,
             concept_graph, landmarks, field_map_style,
@@ -342,7 +354,7 @@ class Exporter:
         html = _build_html_report(
             topic, body_md, field_map_tree, field_tree, problem_tree,
         )
-        path = self._topic_dir(topic) / "report.html"
+        path = self._report_path(topic, "html")
         path.write_text(html, encoding="utf-8")
         logger.info("HTML report exported: %s", path)
         return path
@@ -1039,12 +1051,12 @@ def _render_field_outline(mega: FieldMegaArchitecture) -> list[str]:
         return ""
 
     if mega.major_tasks:
-        out.append("- **Major Tasks**")
+        out.append("- **Research Areas**")
         for name, info in _tasks_by_coverage(mega):
             out.append(f"  - {name}{cov(info)}")
 
     if mega.method_families:
-        out.append("- **Method Families**")
+        out.append("- **Methods**")
         for name, info in _methods_by_coverage(mega):
             reps = ""
             rm = [str(x) for x in (info.get("representative_methods") or [])][:4]
@@ -1083,8 +1095,8 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
     """
     Field Map as a hierarchical TREE diagram (Mermaid flowchart, left→right):
 
-        Topic ─┬─ Major Tasks ─── <task> …
-               ├─ Method Families ─ <family> ── <representative method> …
+        Topic ─┬─ Research Areas ─── <task> …
+               ├─ Methods ─ <family> ── <representative method> …
                ├─ Benchmarks & Datasets ─ <name> …
                ├─ Challenges ─── <challenge> …
                ├─ Research Gaps ─ <gap> …
@@ -1138,18 +1150,18 @@ def _field_map_tree_mermaid(mega: FieldMegaArchitecture) -> str:
                 lines.append(f'  {chid}(["{clean(ch)}"])')
                 lines.append(f"  {iid} --> {chid}")
 
-    # Major Tasks
-    category("Major Tasks", [
+    # Research Areas
+    category("Research Areas", [
         (f"{name}{cov(info)}", [])
         for name, info in _tasks_by_coverage(mega)
     ])
-    # Method Families — representative methods inline (matches the Outline)
+    # Methods — representative methods inline (matches the Outline)
     mf_items: list[tuple[str, list[str]]] = []
     for name, info in _methods_by_coverage(mega):
         reps = [str(x) for x in (info.get("representative_methods") or [])][:4]
         tail = f" — {', '.join(reps)}" if reps else ""
         mf_items.append((f"{name}{cov(info)}{tail}", []))
-    category("Method Families", mf_items, label_max=78)
+    category("Methods", mf_items, label_max=78)
     # Challenges (before Benchmarks per request)
     ch_items: list[tuple[str, list[str]]] = []
     for name, info in _challenges_by_coverage(mega):
@@ -1196,7 +1208,7 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
 
     cats: list[dict] = []
     if mega.major_tasks:
-        cats.append({"label": "Major Tasks", "children": [
+        cats.append({"label": "Research Areas", "children": [
             {"label": f"{name}{cov(info)}", "html": b(name) + esc(cov(info))}
             for name, info in _tasks_by_coverage(mega)
         ]})
@@ -1209,7 +1221,7 @@ def _field_map_tree_data(mega: FieldMegaArchitecture) -> dict:
             if reps:
                 html += esc(" — ") + ", ".join(b(r) for r in reps)
             ch.append({"label": f"{name}{cov(info)}{tail}", "html": html})
-        cats.append({"label": "Method Families", "children": ch})
+        cats.append({"label": "Methods", "children": ch})
     # Challenges before Benchmarks (per request)
     if mega.challenges:
         ch = []
@@ -1293,14 +1305,14 @@ def _field_tree_background(mega: FieldMegaArchitecture) -> list[str]:
 def _render_field_tree_outline(mega: FieldMegaArchitecture) -> list[str]:
     """
     Static (Markdown) Field Tree — the full 5-level problem-solving chain:
-        Background → Topic → Research Area → Method → Representative Technique
+        Core Problems → Topic → Research Areas → Methods → Techniques
     """
     task_method, method_tech = _field_tree_pairs(mega)
     bg = _field_tree_background(mega)
     out: list[str] = []
 
     if bg:
-        out.append("- **Background** *(drivers — many converge onto the topic)*")
+        out.append("- **Core Problems** *(drivers — many converge onto the topic)*")
         for b in bg:
             out.append(f"  - {b}")
     out.append(f"- **{mega.topic}** *(the topic these drivers motivate)*")
@@ -1323,7 +1335,7 @@ def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     """
     JSON-able data for the interactive (HTML) two-column linked view, covering
     every adjacent layer of the 5-level chain:
-        Background ↔ Topic ↔ Research Areas ↔ Methods ↔ Techniques
+        Core Problems ↔ Topic ↔ Research Areas ↔ Methods ↔ Techniques
     """
     task_method, method_tech = _field_tree_pairs(mega)
     topic = mega.topic
@@ -1332,7 +1344,7 @@ def _field_tree_html_data(mega: FieldMegaArchitecture) -> dict:
     pairs: list[dict] = []
     if bg:
         pairs.append({
-            "key": "bg-topic", "leftLabel": "Background", "rightLabel": "Topic",
+            "key": "bg-topic", "leftLabel": "Core Problems", "rightLabel": "Topic",
             "links": {b: [topic] for b in bg},
         })
     if task_method:
@@ -1570,8 +1582,8 @@ def _render_part1_field_architecture(
         "",
         "### Field Tree",
         "",
-        "> The problem-solving chain: **Background → Topic → Research Area → Method → "
-        "Representative Technique**. (Background drivers converge onto the topic; the "
+        "> The problem-solving chain: **Core Problems → Topic → Research Areas → Methods → "
+        "Techniques**. (Core problems converge onto the topic; the "
         "topic unfolds into research areas, methods, and techniques.)",
         "",
     ]
@@ -1716,7 +1728,8 @@ def _render_research_landscape(
     arch_triples: list[tuple[ScoredPaper, PaperSummary, PaperArchitecture]],
 ) -> list[str]:
     """
-    Merged section: Mainstream Research Areas + Methods + Datasets + Challenges.
+    Merged section: Research Areas + Methods + Benchmarks & Datasets + Challenges
+    + Applications — the same buckets as the Field Map, in the same order.
 
     For each method family, links to the actual papers that use it (with
     citation counts and paper-card anchors) so readers can navigate directly
@@ -1730,14 +1743,14 @@ def _render_research_landscape(
         "",
         "### Research Landscape",
         "",
-        "*Mainstream research areas, methods in use, relevant benchmarks, and open challenges — "
+        "*Research areas, methods in use, relevant benchmarks, and challenges — "
         "all cross-referenced to the surveyed papers below.*",
         "",
     ]
 
-    # ── 1. Mainstream research areas ────────────────────────────────────
+    # ── 1. Research areas ───────────────────────────────────────────────
     if mega.major_tasks:
-        lines += ["#### Mainstream Research Areas", ""]
+        lines += ["#### Research Areas", ""]
         lines.append("| Research Area | What it studies | Surveys | Key Papers |")
         lines.append("|---|---|---|---|")
         for task_name, info in _tasks_by_coverage(mega):
@@ -1756,9 +1769,9 @@ def _render_research_landscape(
             lines.append(f"| **{task_name}{warn}** | {safe_desc} | {coverage} | {papers_str} |")
         lines.append("")
 
-    # ── 2. Mainstream methods ────────────────────────────────────────────
+    # ── 2. Methods ──────────────────────────────────────────────────────
     if mega.method_families:
-        lines += ["#### Mainstream Methods", ""]
+        lines += ["#### Methods", ""]
         lines.append(
             "*For each method: what it is, which benchmarks evaluate it, "
             "and which papers use it (citation count in parentheses).*"
@@ -1794,7 +1807,7 @@ def _render_research_landscape(
             if desc:
                 lines.append(f"> {desc}  ")
             if rep_methods:
-                lines.append(f"Representative techniques: {', '.join(rep_methods[:6])}  ")
+                lines.append(f"Techniques: {', '.join(rep_methods[:6])}  ")
             if papers_using:
                 lines.append("Papers using this approach:")
                 for ref in papers_using[:6]:
@@ -1803,7 +1816,7 @@ def _render_research_landscape(
 
     # ── 3. Open challenges (before benchmarks, matching the Field Map) ────
     if mega.challenges:
-        lines += ["#### Open Challenges", ""]
+        lines += ["#### Challenges", ""]
         lines.append("| Challenge | Severity | Surveys | Description |")
         lines.append("|---|---|---|---|")
         for name, info in _challenges_by_coverage(mega):
@@ -1817,7 +1830,7 @@ def _render_research_landscape(
 
     # ── 4. Key benchmarks & datasets ────────────────────────────────────
     if mega.datasets_and_benchmarks:
-        lines += ["#### Key Benchmarks & Datasets", ""]
+        lines += ["#### Benchmarks & Datasets", ""]
         lines.append("| Benchmark / Dataset | Research area | Surveys citing it |")
         lines.append("|---|---|---|")
         for ds in _benchmarks_by_coverage(mega):
@@ -1993,22 +2006,31 @@ def _render_part4_paper_cards(
             lines += _format_prose_as_bullets(arch.organizational_logic)
             lines.append("")
 
-        # Structural strengths and weaknesses (from architecture analysis).
-        # Each on its own paragraph (blank line) so they don't run together.
+        # Structural strengths/weaknesses — bullet lists so every point sits on
+        # its own line and renders identically in Markdown and HTML (no run-on).
         if arch.structural_strengths and not arch.analysis_failed:
             lines.append(f"**Read this if:** {arch.structural_strengths[0]}")
             lines.append("")
         if arch.notable_omissions and not arch.analysis_failed:
-            lines.append(f"**Notable omissions:** {', '.join(arch.notable_omissions[:3])}")
+            lines.append("**Notable omissions:**")
+            lines.append("")
+            for om in arch.notable_omissions[:3]:
+                lines.append(f"- {om}")
             lines.append("")
 
         # LLM-Judge strengths and weaknesses
         if jr and not jr.judge_failed:
             if jr.strengths:
-                lines.append(f"**Strengths:** {' · '.join(jr.strengths[:3])}")
+                lines.append("**Strengths:**")
+                lines.append("")
+                for s in jr.strengths[:3]:
+                    lines.append(f"- {s}")
                 lines.append("")
             if jr.weaknesses:
-                lines.append(f"**Weaknesses:** {' · '.join(jr.weaknesses[:2])}")
+                lines.append("**Weaknesses:**")
+                lines.append("")
+                for w in jr.weaknesses[:2]:
+                    lines.append(f"- {w}")
                 lines.append("")
         lines.append("")
 

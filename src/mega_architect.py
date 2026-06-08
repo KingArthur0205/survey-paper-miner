@@ -60,7 +60,7 @@ STRICT RULES — violating any rule produces an invalid diagram:
    e.g. write  GPT-4 BERT  not  GPT-4 (BERT)
 8. Do NOT use markdown fences, comments, or any text outside the diagram.
 9. Suggested top-level categories (pick the most relevant 4-6):
-   Major Tasks · Method Families · Benchmarks · Challenges · Research Gaps · Applications
+   Research Areas · Methods · Benchmarks & Datasets · Challenges · Research Gaps · Applications
 10. Under each category list the 3-5 most important items as leaves.
 """
 
@@ -448,9 +448,9 @@ def _render_data_mindmap(mega: FieldMegaArchitecture) -> str:
     fields, so every node is exactly the data shown in the report's tables.
 
     Branches (all sourced from the same data the report renders elsewhere):
-      Major Tasks       ← mega.major_tasks
-      Method Families   ← mega.method_families
-      Benchmarks        ← mega.datasets_and_benchmarks
+      Research Areas      ← mega.major_tasks
+      Methods             ← mega.method_families
+      Benchmarks & Datasets ← mega.datasets_and_benchmarks
       Challenges        ← mega.challenges
       Research Gaps     ← mega.open_gaps
       Applications      ← mega.applications
@@ -480,9 +480,9 @@ def _render_data_mindmap(mega: FieldMegaArchitecture) -> str:
                 warn = " ⚠️" if isinstance(cnt, int) and cnt < low else ""
             lines.append(f"      {clean(it)}{warn}")
 
-    branch("Major Tasks", list(mega.major_tasks.keys()), mega.major_tasks)
-    branch("Method Families", list(mega.method_families.keys()), mega.method_families)
-    branch("Benchmarks", [d.get("name", "") for d in mega.datasets_and_benchmarks])
+    branch("Research Areas", list(mega.major_tasks.keys()), mega.major_tasks)
+    branch("Methods", list(mega.method_families.keys()), mega.method_families)
+    branch("Benchmarks & Datasets", [d.get("name", "") for d in mega.datasets_and_benchmarks])
     branch("Challenges", list(mega.challenges.keys()), mega.challenges)
     branch("Research Gaps", [g.gap for g in mega.open_gaps])
     branch("Applications", list(mega.applications))
@@ -507,8 +507,8 @@ def _render_mermaid(mega: FieldMegaArchitecture) -> str:
 
     # Top-level section nodes
     sections = [
-        ("Tasks", "Major Tasks", mega.major_tasks),
-        ("Methods", "Method Families", mega.method_families),
+        ("Tasks", "Research Areas", mega.major_tasks),
+        ("Methods", "Methods", mega.method_families),
         ("Challenges", "Challenges", mega.challenges),
     ]
 

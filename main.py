@@ -816,6 +816,9 @@ def _run_analyze_steps(
     # ------------------------------------------------------------------ #
     run_dir = make_run_dir(cfg.topics, cfg.output_dir)
     exporter = Exporter(run_dir)
+    # report.md / report.html sit at the run root beside papers_ranked.xlsx;
+    # slug-prefix them only when several topics share this run.
+    exporter.multi_topic = len(arch_triples_by_topic) > 1
 
     xlsx_path = exporter.export_xlsx(scored_papers, summary_pairs)
 
