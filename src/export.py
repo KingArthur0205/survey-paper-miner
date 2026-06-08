@@ -724,7 +724,7 @@ _HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <style>
   :root{ --fg:#1f2937; --muted:#6b7280; --border:#e5e7eb; --accent:#2563eb; }
   *{box-sizing:border-box}
-  body{max-width:920px;margin:0 auto;padding:2.5rem 1.5rem 6rem;
+  body{max-width:1280px;margin:0 auto;padding:2.5rem 2rem 6rem;
        font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
        line-height:1.65;color:var(--fg);}
   h1{font-size:1.9rem} h2{font-size:1.5rem;border-bottom:2px solid var(--border);padding-bottom:.3rem;margin-top:2.2rem}
@@ -788,6 +788,20 @@ mermaid.initialize({startOnLoad:false, securityLevel:"loose"});
 
 // 1. render the report markdown
 document.getElementById("content").innerHTML = marked.parse(REPORT_MD);
+
+// 1b. give every heading a GitHub-style id, so the Table of Contents links and
+//     the "Back to Contents" buttons resolve (recent marked.js no longer adds
+//     heading ids automatically).
+(function(){
+  var seen={};
+  document.querySelectorAll("#content h1,#content h2,#content h3,#content h4,#content h5,#content h6").forEach(function(h){
+    var base=h.textContent.toLowerCase().trim()
+      .replace(/[^\\w\\s-]/g,"").replace(/\\s/g,"-").replace(/^-+|-+$/g,"");
+    var id=base, i=1;
+    while(id && seen[id]){ id=base+"-"+(i++); }
+    if(id){ seen[id]=true; h.id=id; }
+  });
+})();
 
 // 2. convert ```mermaid code blocks into mermaid containers
 document.querySelectorAll("code.language-mermaid").forEach(function(c){
